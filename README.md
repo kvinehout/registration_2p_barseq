@@ -24,6 +24,7 @@ INPUTS:
     --remotesubjectpath: This is full path where to files are located eaither locally (ex:--remotesubjectpath='/grid/zador/home/vinehout/code/2d_3D_linear_reg/data') or on remote server (ex:--remotesubjectpath='/home/imagestorage/lectin_1/')
     --input_overlap: Percent image overlap. 0-1, 0.10 represents 10 percent. (ex:--input_overlap=0.10) Feature based registration is used to fine tune this value  
     
+
     #These are optional input arguments
     --opticalZ_dir: This defines the direction the images are stacked within a given folder. For example within folder Pos7_004_000 if the image img_000000000_Il-A_001.tif is on 'top' of img_000000000_Il-A_000.tif image or if img_000000000_Il-A_001.tif is on 'bottom' of img_000000000_Il-A_000.tif. This input can eaither be 'top' or 'bottom' (ex: --opticalZ_dir='top') (default: 'top'") choices=['top', 'bottom']
     --X_dir: This defines the X direction to stich images together (either shift images to the left or right). This value is defined based on the location of X=0, use 'left' if X=0 is on the left side of the physical slice or 'right' if X=0 is on the right side. (ex:--X_dir='right') (default='right') choices=['left', 'right']
