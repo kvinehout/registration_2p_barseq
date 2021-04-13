@@ -1,0 +1,23 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Main_2d_3d" type="PythonConfigurationType" factoryName="Python">
+    <module name="registration_2p_barseq" />
+    <option name="INTERPRETER_OPTIONS" value="" />
+    <option name="PARENT_ENVS" value="true" />
+    <envs>
+      <env name="PYTHONUNBUFFERED" value="1" />
+    </envs>
+    <option name="SDK_HOME" value="" />
+    <option name="WORKING_DIRECTORY" value="$PROJECT_DIR$/../../2d_3D_linear_reg" />
+    <option name="IS_MODULE_SDK" value="true" />
+    <option name="ADD_CONTENT_ROOTS" value="true" />
+    <option name="ADD_SOURCE_ROOTS" value="true" />
+    <option name="SCRIPT_NAME" value="$PROJECT_DIR$/../../2d_3D_linear_reg/Main_2d_3d.py" />
+    <option name="PARAMETERS" value="--remotesubjectpath=/Volumes/Backup5TB/data/lectin_1/ --localsubjectpath=$PROJECT_DIR$/../../2d_3D_linear_reg/ --X_dir=right --Y_dir=top --image_type=Il-A --seq_dir=top --opticalZ_dir=top --input_overlap=0.15 --server=local --user=&quot;imageguest&quot; --password=&quot;zadorlab&quot; --FFT_max_gaussian=10 --error_overlap=0.10 --blank_thres=1.5 --checkerboard_size=6 --seg_interations=35 --seg_smooth=3 --max_Z_proj_affine=False --output=registration_test --find_rot=True --POS_folder_Z 0 -6 --POS_folder_X -6 -3 --POS_folder_Y -2 None" />
+    <option name="SHOW_COMMAND_LINE" value="false" />
+    <option name="EMULATE_TERMINAL" value="false" />
+    <option name="MODULE_MODE" value="false" />
+    <option name="REDIRECT_INPUT" value="false" />
+    <option name="INPUT_FILE" value="" />
+    <method v="2" />
+  </configuration>
+</component>
