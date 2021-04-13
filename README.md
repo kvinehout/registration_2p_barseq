@@ -43,9 +43,14 @@ INPUTS:
     --POS_folder_Y: Only needed if folders with images dont follow the format POSZ(Z)_XXX_YYY. This defines the position of the Y value in the folder name. Only numbers are indexed, so POS1_001_001 becomes 1001001 for indexing. (EX: --POS_folder_X -2,-1) This works for the file POSZ(Z)_XXX_YYY. Here python slice notation is used. (defualt [-2,-1]
     --extra_figs:This is used to save additional figured useful in troubleshooting, results saved in registration folder. (ex: --saved_transforms_path=True). (Default: Fasle)
     --max_Z_proj_affine:This is used to use max Z projections instead of once slice for affine Z slice to Z slice calculateions.  Set to true if images are  noisy, or false if low noise levels. (ex:--max_Z_proj_affine=False)(defualt:True)
-    --high_thres", This is used to theshold image. Values above high_thres * the mean of the image will be set to zero (ex:--high_thres=10)(default:10)
-    --rigid_2d3d This is used to only run rigid registratiion on feature map when combining Z planes, otherwise affine registration with optical flow is preformed.(ex:--rigid_2d3d=False)(default:False)
-    --output This is used to define the output folder.(ex:--output='registration')(default:'registration')
+    --high_thres: This is used to theshold image. Values above high_thres * the mean of the image will be set to zero (ex:--high_thres=10)(default:10)
+    --rigid_2d3d: This is used to only run rigid registratiion on feature map when combining Z planes, otherwise affine registration with optical flow is preformed.(ex:--rigid_2d3d=False)(default:False)
+    --output: This is used to define the output folder.(ex:--output='registration')(default:'registration')
+    --apply_transform: This is set to true if you want to apply transfomations calculated on a diffferent image channel to the image channel provided here. --saved_transforms_path needs to be defined for this work. (defualt: False)
+    --saved_transforms_path: This is used if --apply_transform is set to true. This is the full path to the folder where registration files from another set of images are saved. This needs to included image type for saved files (ex: Il-A)  ex: '/Users/kaleb/data/2d_3D_linear_reg/registration/Il-A'. (default:none)
+    --find_rot: This is set to true to look for 180 degree rotated physical slices.(ex:--find_rot=True)(default:'Fasle')
+    --degree_thres: This is used to define the angle error tolerance from Physical Z slice to Physical Z slice registration, this tolerance is added to a search around zero and 180 degrees. Values are in degrees. (ex:--degree_thres=10)(default:10)
+    --denoise_all:This is used to output a denoise array that is the same size as the full dataset. If set to false the denoise array is only the images used for registration. (ex:--denoise_all=True)(default:True)
 
 OUTPUTS:
 
