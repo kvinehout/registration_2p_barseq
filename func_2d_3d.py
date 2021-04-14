@@ -274,11 +274,69 @@ def denoise(A, FFT_max_gaussian, high_thres):
     return denoised
 
 
-def feature_CV2(destination, source):
-    des3d_feature_rotated = skimage.transform.rotate(des3d_feature, 180)
-    destination = des3d_feature_rotated
-    source = des3d_feature  # src3d_feature
+# Load our images
+img1 = cv2.imread("first.jpg")
+img2 = cv2.imread("second.jpg")
+img1_gray = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+img2_gray = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+cv2_imshow(img1_gray)
+cv2_imshow(img2_gray)
 
+destination = np.interp(destination, (destination.min(), destination.max()), (0, +255))
+source = np.interp(source, (source.min(), source.max()), (0, +255))
+# change dtype to unit 8 --> so get rid of decimals
+img1_gray = destination.astype(np.uint8)
+img2_gray = source.astype(np.uint8)
+# Create our ORB detector and detect keypoints and descriptors
+orb = cv2.ORB_create(nfeatures=2000)
+# Find the key points and descriptors with ORB
+keypoints1, descriptors1 = orb.detectAndCompute(img1_gray, None)
+keypoints2, descriptors2 = orb.detectAndCompute(img2_gray, None)
+# Create a BFMatcher object.
+# It will find all of the matching keypoints on two images
+bf = cv2.BFMatcher_create(cv2.NORM_HAMMING)
+# Find matching points
+matches = bf.knnMatch(descriptors1, descriptors2, k=2)
+all_matches = []
+for m, n in matches:
+    all_matches.append(m)
+# Finding the best matches
+good = []
+for m, n in matches:
+    if m.distance < 0.6 * n.distance:
+        good.append(m)
+# Set minimum match condition
+MIN_MATCH_COUNT = 10
+if len(good) > MIN_MATCH_COUNT:
+    # Convert keypoints to an argument for findHomography
+    src_pts = np.float32([keypoints1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
+    dst_pts = np.float32([keypoints2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
+    # Establish a homography
+    M, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
+
+
+def feature_CV2(destination_raw, source_raw, diroverlap, FFT_max_gaussian, high_thres):
+    """This finds the overlay given A and B with feature based registration
+        Args:
+        -	A: 3D set of images to overlap source (moving image)
+        -   B: 3D set of images to overlap target
+        -   diroverlap: the direction of overlap, the direction the source image moves --> up, down, left or right
+        -  FFT_max_gaussian: used for denoise
+        -  high_thres: used for denoise
+
+        Returns:
+        -	target_overlap: pixel number of overlay
+    """
+    destination_mean = np.mean(destination_raw, axis=2)
+    source_mean = np.mean(source_raw, axis=2)
+    # denoise image
+    destination_denoise = denoise(destination_mean, FFT_max_gaussian, high_thres)
+    source_denoise = denoise(source_mean, FFT_max_gaussian, high_thres)
+    # limit to only high values
+    source_denoise_std = np.where(source_denoise < source_denoise.std(), 0, source_denoise)
+    destination_denoise_std = np.where(destination_denoise < destination_denoise.std(), 0, destination_denoise)
+    destination = destination_denoise_std
+    source = source_denoise_std
     # convert to grayscale
     destination = np.interp(destination, (destination.min(), destination.max()), (0, +255))
     source = np.interp(source, (source.min(), source.max()), (0, +255))
@@ -337,8 +395,16 @@ def feature_CV2(destination, source):
     shift[0] = m[1, 2]
     shift[1] = m[0, 2]
     error = 0  # todo add this?
-
-    return shift, error
+    # abs used below so source or destination order doesnt matter and subject from edge to get overlap value
+    if diroverlap == 'up' or diroverlap == 'down':
+        target_overlap = source_raw.shape[0] - abs(int(round(shift[0])))
+    elif diroverlap == 'left' or diroverlap == 'right':
+        target_overlap = source_raw.shape[1] - abs(int(round(shift[1])))
+    else:
+        warnings.warn(
+            "WARNING: diroverlap not defined correctly, Set to down, up, left or right. Currently set to {} ".format(
+                diroverlap))
+    return target_overlap,
 
 
 def Seg_reg_phase(A, B, FFT_max_gaussian, name, extra_figs, high_thres):
@@ -396,100 +462,6 @@ def Seg_reg_phase(A, B, FFT_max_gaussian, name, extra_figs, high_thres):
 
     return shift_reg, error, Within_Trans
 
-
-def findoverlay(A, B, diroverlap):
-    import skimage
-    """
-    This finds the overlay given A and B
-        Args:
-        -	A: 3D set of images to overlap source (moving image)
-        -   B: 3D set of images to overlap target
-        -   diroverlap: the direction of overlap, the direction the source image moves --> up, down, left or right
-
-        Returns:
-        -	target_overlap: pixel number of overlay
-        -   overlay_var: the variance of the overlay across 2D images ---> should be pretty small s
-    """
-    # get mean of A and B
-
-    A_mean = np.max(A, axis=2)
-    B_mean = np.max(B, axis=2)
-    # A_denosie=denoise(A_mean, FFT_max_gaussian, high_thres)
-    # B_denosie=denoise(B_mean, FFT_max_gaussian, high_thres)
-    # shift, error = feature_CV2(B_denosie, A_denosie)
-    # for all sets of 2D images
-    maxover_ind = []
-    target_overlap = []
-    # for i in range(A.shape[2]):
-    image_similarity = []
-    if diroverlap == 'up' or diroverlap == 'down':
-        scan_amount = round(int((int(A.shape[0]))) / 2)
-    elif diroverlap == 'left' or diroverlap == 'right':
-        scan_amount = round(int((int(A.shape[1]))) / 2)
-    # for all pixels shift along diroverlap
-    for ii in range(7, scan_amount):  # for only 1/2 of image
-        # shift image by one pixel along overlap direction
-        # find image overlap ORDER H,W,D (Y,X,Z)
-        if diroverlap == 'up':  # LEFT --> for B start at end of Y direction, for A start at beginning of Y direction (FIX X)
-            A_over = A_mean[:ii, :]
-            B_over = B_mean[-ii:, :]
-        elif diroverlap == 'down':  # RIGHT --> for B start at beginning of Y direction , for A start at end of Y direction (FIX X)
-            A_over = A_mean[-ii:, :]
-            B_over = B_mean[:ii, :]
-        elif diroverlap == 'left':  # UP --> for B start and end of X direction, for A start at beginning ofr X direction (FIX Y)
-            A_over = A_mean[:, :ii]
-            B_over = B_mean[:, -ii:]
-        elif diroverlap == 'right':  # downs --> for B start at beginning of X direction , for A start at end of X direction (FIX Y)
-            A_over = A_mean[:, -ii:]
-            B_over = B_mean[:, :ii]
-        # calculate overlap image similarity
-        if ii < 7:
-            image_similarity_one = skimage.metrics.structural_similarity(A_over, B_over, win_size=3)
-        else:
-            image_similarity_one = skimage.metrics.structural_similarity(A_over, B_over)
-        image_similarity.append(image_similarity_one)
-    # find maximum
-    maxover_ind.append(image_similarity.index(max(image_similarity)))
-    # target_overlap = maxover_ind  # np.median(maxover_ind)
-    # define overlap based on derivative
-    grad_image = np.gradient(image_similarity)
-    target_overlap = [int(round(np.mean([grad_image.argmax(), grad_image.argmin()])))]
-
-    return target_overlap
-
-
-def initial_transform(target_overlap, diroverlap):
-    """
-    This gets the initial transform to apply as first guess for ICP
-        Args:
-        -	overlap: overlap number of pixels
-        -   diroverlap: the direction of the overlap
-
-        Returns:
-        -	Int_Trans: initial transform
-
-    """
-    # NOTE ARRAY in H, W, D or (Y,X,Z) order
-
-    # find image overlap
-    if diroverlap == 'left' or diroverlap == 'right':
-        X_shift = target_overlap
-        Y_shift = 0
-        SKI_Trans = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=0,
-                                                          translation=(X_shift, Y_shift))
-        Int_Trans = SKI_Trans._inv_matrix
-    elif diroverlap == 'up' or diroverlap == 'down':
-        X_shift = 0
-        Y_shift = target_overlap
-        SKI_Trans = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=0,
-                                                          translation=(X_shift, Y_shift))
-        Int_Trans = SKI_Trans._inv_matrix
-    # todo change for 3d (is this needed?) --> not needed for skimage.transform.warp --> is needed for o3d.pipelines.registration.registration_icp ?
-    # MODIFY FOR 3d
-    # Int_Trans= ??? trans_init_array
-    # Int_Trans=abs(Int_Trans) #get rid of any negatives
-
-    return Int_Trans
 
 
 def zero_pad(A, B, dim):
@@ -618,7 +590,7 @@ def registration_X(srcY, desY, X_dir, FFT_max_gaussian, error_overlap, X, Y, Z, 
     input_overlap = round(srcY.shape[1] * input_overlap)
     if X == 1 and Y == 0 and Z == 0:  # calculate the initial stitch level ONLY for first overlap
         diroverlap = X_dir  # 'right'
-        [target_overlapX] = findoverlay(srcY, desY, diroverlap)
+        [target_overlapX] = feature_CV2(desY, srcY, diroverlap, FFT_max_gaussian, high_thres)
         # make sure user defined input of input_overlap, else just use calculated
         try:
             input_overlap
@@ -635,8 +607,6 @@ def registration_X(srcY, desY, X_dir, FFT_max_gaussian, error_overlap, X, Y, Z, 
                     target_overlapX, (error_overlap * 100), input_overlap))
             # use user defined value instead
             target_overlapX = input_overlap
-        # calculate initial transformation from overlap
-        trans_init_stitchX = initial_transform(target_overlapX, diroverlap)
     # calculate shift on MEAN image --> apply to whole image this helps with noisy images
     srcY_mean = np.max(srcY, axis=2)  # , dtype=srcY.dtype)
     desY_mean = np.max(desY, axis=2)  # , dtype=desY.dtype)
@@ -751,7 +721,7 @@ def registration_Y(srcZ, desZ, Y_dir, FFT_max_gaussian, error_overlap, X, Y, Z, 
             diroverlap = 'down'
         elif Y_dir == 'bottom':
             diroverlap = 'up'
-        [target_overlapY] = findoverlay(srcZ, desZ, diroverlap)
+        [target_overlapY] = feature_CV2(desZ, srcZ, diroverlap, FFT_max_gaussian, high_thres)
         # print warning if user defined overlap and calculated overlap different
         if target_overlapY in range(round((input_overlap - (input_overlap * error_overlap))),
                                     round((input_overlap + (input_overlap * error_overlap)))):
@@ -767,8 +737,7 @@ def registration_Y(srcZ, desZ, Y_dir, FFT_max_gaussian, error_overlap, X, Y, Z, 
 
             target_overlapY = input_overlap
 
-        # calculate initial transformation from overlap
-        trans_init_stitchY = initial_transform(target_overlapY, diroverlap)
+
     # calculate shift on MEAN image --> apply to whole image this helps with noisy images
     srcZ_mean = np.max(srcZ, axis=2)  # , dtype=srcZ.dtype)
     desZ_mean = np.max(desZ, axis=2)  # , dtype=desZ.dtype)
@@ -1080,6 +1049,103 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
 
 
 """
+
+def findoverlay(A, B, diroverlap):
+    import skimage
+    This finds the overlay given A and B
+        Args:
+        -	A: 3D set of images to overlap source (moving image)
+        -   B: 3D set of images to overlap target
+        -   diroverlap: the direction of overlap, the direction the source image moves --> up, down, left or right
+
+        Returns:
+        -	target_overlap: pixel number of overlay
+        -   overlay_var: the variance of the overlay across 2D images ---> should be pretty small s
+    # get mean of A and B
+
+    A_mean = np.max(A, axis=2)
+    B_mean = np.max(B, axis=2)
+    # A_denosie=denoise(A_mean, FFT_max_gaussian, high_thres)
+    # B_denosie=denoise(B_mean, FFT_max_gaussian, high_thres)
+    # shift, error = feature_CV2(B_denosie, A_denosie)
+    # for all sets of 2D images
+    maxover_ind = []
+    target_overlap = []
+    # for i in range(A.shape[2]):
+    image_similarity = []
+    if diroverlap == 'up' or diroverlap == 'down':
+        scan_amount = round(int((int(A.shape[0]))) / 2)
+    elif diroverlap == 'left' or diroverlap == 'right':
+        scan_amount = round(int((int(A.shape[1]))) / 2)
+    # for all pixels shift along diroverlap
+    for ii in range(7, scan_amount):  # for only 1/2 of image
+        # shift image by one pixel along overlap direction
+        # find image overlap ORDER H,W,D (Y,X,Z)
+        if diroverlap == 'up':  # LEFT --> for B start at end of Y direction, for A start at beginning of Y direction (FIX X)
+            A_over = A_mean[:ii, :]
+            B_over = B_mean[-ii:, :]
+        elif diroverlap == 'down':  # RIGHT --> for B start at beginning of Y direction , for A start at end of Y direction (FIX X)
+            A_over = A_mean[-ii:, :]
+            B_over = B_mean[:ii, :]
+        elif diroverlap == 'left':  # UP --> for B start and end of X direction, for A start at beginning ofr X direction (FIX Y)
+            A_over = A_mean[:, :ii]
+            B_over = B_mean[:, -ii:]
+        elif diroverlap == 'right':  # downs --> for B start at beginning of X direction , for A start at end of X direction (FIX Y)
+            A_over = A_mean[:, -ii:]
+            B_over = B_mean[:, :ii]
+        # calculate overlap image similarity
+        if ii < 7:
+            image_similarity_one = skimage.metrics.structural_similarity(A_over, B_over, win_size=3)
+        else:
+            image_similarity_one = skimage.metrics.structural_similarity(A_over, B_over)
+        image_similarity.append(image_similarity_one)
+    # find maximum
+    maxover_ind.append(image_similarity.index(max(image_similarity)))
+    # target_overlap = maxover_ind  # np.median(maxover_ind)
+    # define overlap based on derivative
+    grad_image = np.gradient(image_similarity)
+    target_overlap = [int(round(np.mean([grad_image.argmax(), grad_image.argmin()])))]
+
+    return target_overlap
+
+
+
+
+       # [target_overlapY] = findoverlay(srcZ, desZ, diroverlap)
+
+        #[target_overlapX] = findoverlay(source_good, destination_good, diroverlap)
+
+def initial_transform(target_overlap, diroverlap):
+    This gets the initial transform to apply as first guess for ICP
+        Args:
+        -	overlap: overlap number of pixels
+        -   diroverlap: the direction of the overlap
+
+        Returns:
+        -	Int_Trans: initial transform
+    # NOTE ARRAY in H, W, D or (Y,X,Z) order
+
+    # find image overlap
+    if diroverlap == 'left' or diroverlap == 'right':
+        X_shift = target_overlap
+        Y_shift = 0
+        SKI_Trans = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=0,
+                                                          translation=(X_shift, Y_shift))
+        Int_Trans = SKI_Trans._inv_matrix
+    elif diroverlap == 'up' or diroverlap == 'down':
+        X_shift = 0
+        Y_shift = target_overlap
+        SKI_Trans = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=0,
+                                                          translation=(X_shift, Y_shift))
+        Int_Trans = SKI_Trans._inv_matrix
+    # todo change for 3d (is this needed?) --> not needed for skimage.transform.warp --> is needed for o3d.pipelines.registration.registration_icp ?
+    # MODIFY FOR 3d
+    # Int_Trans= ??? trans_init_array
+    # Int_Trans=abs(Int_Trans) #get rid of any negatives
+
+    return Int_Trans
+
+
     #last resort... try feature detection again?????
 
 

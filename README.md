@@ -2,30 +2,29 @@
 
 Written BY: Kaleb Vinehout:  klvinehout@gmail.com
 
-About The Project:
+# About The Project:
 
     This code combines 2D images from fluorescence microscopy into a 3D volume. This involves ridgid transforms to stich together overlapping images and affine registration to combine physical non-overlapping slices. This can also be used to copy the resgitration transforms from one channel to another imaging channel. This outputs the registraation files, the registreed data as a numpy array and images of the raw and feature map registered.
 
-PREREQUISITE:
+# PREREQUISITE:
 
     -Docker 
 
-ASSUMPTIONS:
+# ASSUMPTIONS:
 
     -overlap in X is same for all cubes within defined error (suggested 10%)
     -overlap in Y is same for all cubes within defined error (suggested 10%)
 
-INPUTS:
+# INPUTS:
 
-    #these are REQUIRED inputs arguments
+## These are REQUIRED inputs arguments
     --seq_dir: This is used to define the order of folders representing physical slices. Here set equal to 'top' if POS1 is above POS 0 and 'bottom' if POS 1 is below POS 0 (EX: --seq_dir='top')
     --image_type: This is the file name prefex of images to register (img_000000000_Il-A_000.tif)  Note its assumed optical Z number is after this label in the image name (ex:'--image_type = 'Il-A')
     --localsubjectpath: This is full path where to load and save files  (ex:' --localsubjectpath='/grid/zador/home/vinehout/code/2d_3D_linear_reg/')
     --remotesubjectpath: This is full path where to files are located eaither locally (ex:--remotesubjectpath='/grid/zador/home/vinehout/code/2d_3D_linear_reg/data') or on remote server (ex:--remotesubjectpath='/home/imagestorage/lectin_1/')
     --input_overlap: Percent image overlap. 0-1, 0.10 represents 10 percent. (ex:--input_overlap=0.10) Feature based registration is used to fine tune this value  
-    
 
-    #These are optional input arguments
+## These are optional input arguments
     --opticalZ_dir: This defines the direction the images are stacked within a given folder. For example within folder Pos7_004_000 if the image img_000000000_Il-A_001.tif is on 'top' of img_000000000_Il-A_000.tif image or if img_000000000_Il-A_001.tif is on 'bottom' of img_000000000_Il-A_000.tif. This input can eaither be 'top' or 'bottom' (ex: --opticalZ_dir='top') (default: 'top'") choices=['top', 'bottom']
     --X_dir: This defines the X direction to stich images together (either shift images to the left or right). This value is defined based on the location of X=0, use 'left' if X=0 is on the left side of the physical slice or 'right' if X=0 is on the right side. (ex:--X_dir='right') (default='right') choices=['left', 'right']
     --Y_dir: This defines the Y direction to stich images together (either shift images to the top or bottom). This value is defined based on the location of Y=0, use 'top' if Y=0 is on the top of the physical slice or 'bottom' if X=0 is on the bottom. (ex:--X_dir='top') (default='top') choices=['top', 'bottom']
@@ -52,7 +51,7 @@ INPUTS:
     --degree_thres: This is used to define the angle error tolerance from Physical Z slice to Physical Z slice registration, this tolerance is added to a search around zero and 180 degrees. Values are in degrees. (ex:--degree_thres=10)(default:10)
     --denoise_all:This is used to output a denoise array that is the same size as the full dataset. If set to false the denoise array is only the images used for registration. (ex:--denoise_all=True)(default:True)
 
-OUTPUTS:
+# OUTPUTS:
 
     -outputs are saved under 'localsubjectpath/registration'
     -reg_3Dimage: numpy array of 3D brain
@@ -60,7 +59,7 @@ OUTPUTS:
     -3D_brain_slide: .gif of 3D brain sliding though 2D slices
     - *target_overlapX.npy, *target_overlapY.npy, *shift_within.npy, *shiftX.npy, *shiftY.npy, *shiftZ.npy : these are the registration value that can be used on another channel to provide same registration as applied to this image
 
-FILES:
+# FILES:
 
     -docker: This is to create docker file with versions of all software packages used 
     -Main_2d_3d.py: main python script
@@ -68,7 +67,7 @@ FILES:
     -Main_file.sh: This is an example fille with options to run program 
     -README.md: this file
 
-USEAGE:
+# USEAGE:
 
     #this converts 2D barseq data into 2D barseq data
     python Main_2d_3d.py --remotesubjectpath='/home/imagestorage/ZadorConfocal1/xiaoyin/20201205JB050tomatolectinlabeling647/lectin_1/' --localsubjectpath='/grid/zador/home/vinehout/code/2d_3D_linear_reg/' --X_dir='right' --Y_dir='top' --image_type='Il-A' --seq_dir='top' --opticalZ_dir='top' --input_overlap=287 --server='zadorstorage2.cshl.edu' --user='imageguest' --password='zadorlab'

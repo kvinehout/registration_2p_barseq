@@ -358,7 +358,6 @@ def main(args):
                             srcY_T = skimage.img_as_uint(srcY_T, force_copy=False)
                         # rearanage
                         srcY_T_re = np.transpose(srcY_T, axes=[1, 2, 0])
-                        # todo calculate features here and add to feature map
                         if args.max_Z_proj_affine:
                             srcY_T_re_one = np.max(srcY_T_re, axis=2)
                             desY_one = np.max(desY, axis=2)
@@ -645,7 +644,7 @@ def main(args):
                         src3d_T_denoise = np.expand_dims(src3d_T_denoise, axis=-1)
                     if args.seq_dir == 'top':  # this is top if POS1 is above POS 0 and 'bottom' if POS 1 is below POS 0
                         d3_img = np.concatenate((src3d_T, des3d), axis=2)
-                        print(src3d_T.shape())
+                        print(src3d_T.shape)
                         print(des3d.shape())
                         print(src3d_T_denoise.shape())
                         print(des3d_denoise.shape())
