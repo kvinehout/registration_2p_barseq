@@ -5,6 +5,26 @@ Written BY: Kaleb Vinehout:  klvinehout@gmail.com
 # About The Project:
 
     This code combines 2D images from fluorescence microscopy into a 3D volume. This involves ridgid transforms to stich together overlapping images and affine registration to combine physical non-overlapping slices. This can also be used to copy the resgitration transforms from one channel to another imaging channel. This outputs the registraation files, the registreed data as a numpy array and images of the raw and feature map registered.
+    
+    Step 1: Rigidly Register within each POS folder
+        - Use phase correlation to register within optical slice
+        - If values are non-zero denoiseing is perfomred
+            -Phase correlation performed on denoised values
+    
+    Step 2: Rigidly Stitch together X and Y to create physical slice Z plane
+        - Use open CV feautre detection or user provided value to determine rough image overlap (or use user provied value)
+        - Image overlaping areas are phase correlated to determine translation
+        - default image overlap is applied to blank images
+        -If images are shifted greater then error tolerance images are denoised
+            -phase correlation on these denoised images, this is useful if few blood vessels in image
+    
+    
+    Step 3: Register Z planes together
+        - denoise the Z plane image
+        - segment the Z plane image
+        - determine angle rotation with polar and log polar transfomations
+        - deterimine translation with phase correlation of segmented images
+        - use optical flow registration for non-linear aligment of Z planes 
 
 # PREREQUISITE:
 

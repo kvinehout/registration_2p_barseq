@@ -3,37 +3,45 @@
 """
 Created on Nov 24th 2020
 2d-to-3d
-@author: Kaleb Vinehout
+@author: Kaleb Vinehout: klvinehout@gmail.com
 
 This code combines 2D data into 3d volume
 
-Input: folder path to files labels with POS names and type of files within this folder to register (ex: 'IL-A’)
+Input: (required)
+    --seq_dir: This is used to define the order of folders representing physical slices. Here set equal to 'top' if POS1 is above POS 0 and 'bottom' if POS 1 is below POS 0 (EX: --seq_dir='top')
+    --image_type: This is the file name prefex of images to register (img_000000000_Il-A_000.tif)  Note its assumed optical Z number is after this label in the image name (ex:'--image_type = 'Il-A')
+    --localsubjectpath: This is full path where to load and save files  (ex:' --localsubjectpath='/grid/zador/home/vinehout/code/2d_3D_linear_reg/')
+    --remotesubjectpath: This is full path where to files are located eaither locally (ex:--remotesubjectpath='/grid/zador/home/vinehout/code/2d_3D_linear_reg/data') or on remote server (ex:--remotesubjectpath='/home/imagestorage/lectin_1/')
+
+
+Output:
+    -outputs are saved under 'localsubjectpath/registration'
+    -reg_3Dimage: numpy array of 3D brain
+    -3D_brain_rotate: .gif of roating 3D brain based on features
+    -3D_brain_slide: .gif of 3D brain sliding though 2D slices
+    - *target_overlapX.npy, *target_overlapY.npy, *shift_within.npy, *shiftX.npy, *shiftY.npy, *shiftZ.npy : these are the registration value that can be used on another channel to provide same registration as applied to this image
+
 
 Step 1: Rigidly Register within each POS folder
-	- should have very close initial guess already
-	- Here use ICP to register (local registration method)
-		- get point cloud with canny edge detection
-		- use 03d package for point cloud
-		- apply point cloud transform to image with scikit image package
+	- Use phase correlation to register within optical slice
+	- If values are non-zero denoiseing is perfomred
+	    -Phase correlation performed on denoised values
+
+Step 2: Rigidly Stitch together X and Y to create physical slice Z plane
+    - Use open CV feautre detection or user provided value to determine rough image overlap (or use user provied value)
+    - Image overlaping areas are phase correlated to determine translation
+    - default image overlap is applied to blank images
+    -If images are shifted greater then error tolerance images are denoised
+        -phase correlation on these denoised images, this is useful if few blood vessels in image
 
 
-Step 2: Rigidly Stitch together Z plane
-	- first calculate percentage image overlap (here we are probably adding a few hours to computational time…. .but i think its worth it)
-		- here we take the first overlap and do a full search to find maximum image overlap similarity
-		- assume only translation and only in 1 direction ( defined by how images are taken)
-	- use calculated percentage image overlap as initial guess to stitch images together
-	- to stitch images tougher use ICP (with o3d package)  or phase correlation (scikit - image package) with this initial guess
-	- here only do 2D sticking, assuming Z axis is correct between POS folders
+Step 3: Register Z planes together
+    - denoise the Z plane image
+    - segment the Z plane image
+    - determine angle rotation with polar and log polar transfomations
+    - deterimine translation with phase correlation of segmented images
+    - use optical flow registration for non-linear aligment of Z planes 
 
-
-Step 3: Affine Register Z planes together
-      - here we are assuming that the initial position is close to true alignment (b/c we have lots of data in a Z plane could try to globally register with ICP RANSAC algorithm if assumption not true)
-	- use O3D package ICP software package
-	- use point to plane ICP methods ( or point to point ICP ?) to register Z planes together
-	- get transform and apply to images with scikit software package
-
-
-Output: np array of 3D image, calculated image overlap,  and video(— or some other file type ?) of rotating brain
 
 
 """

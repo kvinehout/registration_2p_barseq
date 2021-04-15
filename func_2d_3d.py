@@ -702,8 +702,6 @@ def registration_Y(srcZ, desZ, Y_dir, FFT_max_gaussian, error_overlap, X, Y, Z, 
                 warnings.warn(
                     "WARNING: calculated Y overlap of {} not within {} % of user defined overlap of {}. Using user defined overlap.".format(
                         target_overlapY, (error_overlap * 100), input_overlap))
-                # use user defined value instead
-                # todo set this to target_overlapX if within error of target_overlapY
                 target_overlapY = input_overlap
     # calculate shift on MEAN image --> apply to whole image this helps with noisy images
     srcZ_mean = np.max(srcZ, axis=2)  # , dtype=srcZ.dtype)
