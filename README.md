@@ -4,7 +4,10 @@ Written BY: Kaleb Vinehout:  klvinehout@gmail.com
 
 # About The Project:
 
-    This code combines 2D images from fluorescence microscopy into a 3D volume. This involves ridgid transforms to stich together overlapping images and affine registration to combine physical non-overlapping slices. This can also be used to copy the resgitration transforms from one channel to another imaging channel. This outputs the registraation files, the registreed data as a numpy array and images of the raw and feature map registered.
+    This code combines 2D images from fluorescence microscopy into a 3D volume. 
+    This involves ridgid transforms to stich together overlapping images and affine registration to combine physical non-overlapping slices.
+    This can also be used to copy the resgitration transforms from one channel to another imaging channel. This outputs the registraation files, the registreed data as a numpy array and images of the raw and feature map registered.
+    There are four main parts: 1) Denoise, 2) registraion within optical slice, 3) stiching images along X and Y together, and 4) aligning physical Z slices together.
 
 #### Preprocessing: Denoise
 
@@ -61,6 +64,7 @@ Image of after X & Y stitching registration:
         - use optical flow registration for non-linear aligment of Z planes 
 
 Image of after denoise:
+
 ![](images_readme/Zplane_denoise.png)
 
 Image of after segmentation:
