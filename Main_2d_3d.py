@@ -86,10 +86,10 @@ def parse_args(add_help=True):
     parser.add_argument("--remotesubjectpath", required=True, type=str, action='append',
                         help="This is full path where to files are located eaither locally or on remote server (ex:'/home/imagestorage/ZadorConfocal1/xiaoyin/20201205JB050tomatolectinlabeling647/lectin_1/'")
 
-    parser.add_argument("--input_overlap", required=True, type=float,
+    # this adds optional input arguments
+    parser.add_argument("--input_overlap", default=None, type=float,
                         help="Percent image overlap. 0-1, 0.10 represents 10 percent. (ex:--input_overlap=0.10)")
 
-    # this adds optional input arguments
     parser.add_argument("--opticalZ_dir", default='top', choices=['top', 'bottom'],
                         help="this is 'top' if image 1 is above image 0 and 'bottom' if image 1 is below image 0 (default: 'top'")
     parser.add_argument("--X_dir", default='right', choices=['left', 'right'],
@@ -104,8 +104,8 @@ def parse_args(add_help=True):
                         help="Password to access server where filels are located,(ex:'mypassword'), Not required files on local computer. (default: None)")
     parser.add_argument('--FFT_max_gaussian', default=10, type=int,
                         help="High_Sigma value for band pass filtering to remove low frequencies. See skimage.filters.difference_of_gaussians for details (default: 10)")
-    parser.add_argument('--error_overlap', default=0.10, type=float,
-                        help="Largest accetable error from input_overlay and actual registration shift. Percentage error repersented as a decimal (ex:0.10) (default 10 percent: 0.10)")
+    parser.add_argument('--error_overlap', default=0.15, type=float,
+                        help="Largest accetable error from input_overlay and actual registration shift. Percentage error repersented as a decimal (ex:0.10) (default 15 percent: 0.15)")
     parser.add_argument('--blank_thres', default=1.5, type=float,
                         help="Threshold to identifiy blank images. Used to see if max more then blank_thres * greater then mean of image (default: 1.5)")
     parser.add_argument('--checkerboard_size', default=6, type=int,
@@ -181,7 +181,7 @@ def main(args):
     # append values?
     # memorize function? --> only if use same input multipel times... basically makes dictionary
     # use hashing to store variables?
-    for pathi in range(int(args.remotesubjectpath.__len__())):  # todo change this line to test one Z plane
+    for pathi in range(int(args.remotesubjectpath.__len__())):
         remotesubjectpath_one = args.remotesubjectpath[pathi]
         print(remotesubjectpath_one)
         # get all file images to load in 3D cube
@@ -233,7 +233,6 @@ def main(args):
         MaxCubeZ = max(ALLCubeZ)
         del ALLCubeZ
         # for each Z value
-        # todo
         for Z_one in range(int(MaxCubeZ) + 1):
             Z = Z_one + (pathi * (int(MaxCubeZ) + 1))
             print("Z = {}".format(Z))
@@ -644,12 +643,6 @@ def main(args):
                         src3d_T_denoise = np.expand_dims(src3d_T_denoise, axis=-1)
                     if args.seq_dir == 'top':  # this is top if POS1 is above POS 0 and 'bottom' if POS 1 is below POS 0
                         d3_img = np.concatenate((src3d_T, des3d), axis=2)
-                        print(src3d_T.shape)
-                        print(des3d.shape())
-                        print(src3d_T_denoise.shape())
-                        print(des3d_denoise.shape())
-                        print(src3d_T_feature.shape())
-                        print(des3d_feature.shape())
                         d3_img_denoise = np.concatenate((src3d_T_denoise, des3d_denoise), axis=2)
                         d3_img_feature = np.concatenate((src3d_T_feature, des3d_feature), axis=2)
                     elif args.seq_dir == 'bottom':
@@ -665,6 +658,11 @@ def main(args):
                         src3d_T_feature = np.expand_dims(src3d_T_feature, axis=-1)  # expand dim for added unit
                     if d3_array_feature.ndim == 2:
                         d3_array_feature = np.expand_dims(d3_array_feature, axis=-1)  # expand dim for added unit
+                    # this is done if denoise_all is not selected then ndim==2
+                    if d3_array_denoise.ndim == 2:
+                        d3_array_denoise = np.expand_dims(d3_array_denoise, axis=-1)
+                    if src3d_T_denoise.ndim == 2:
+                        src3d_T_denoise = np.expand_dims(src3d_T_denoise, axis=-1)
                     # pad the 3D image in the Y
                     # pad in the Y
                     dim = 0

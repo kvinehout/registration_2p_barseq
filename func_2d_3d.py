@@ -273,48 +273,6 @@ def denoise(A, FFT_max_gaussian, high_thres):
     # A[low_values_flags] = 0
     return denoised
 
-
-# Load our images
-img1 = cv2.imread("first.jpg")
-img2 = cv2.imread("second.jpg")
-img1_gray = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
-img2_gray = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
-cv2_imshow(img1_gray)
-cv2_imshow(img2_gray)
-
-destination = np.interp(destination, (destination.min(), destination.max()), (0, +255))
-source = np.interp(source, (source.min(), source.max()), (0, +255))
-# change dtype to unit 8 --> so get rid of decimals
-img1_gray = destination.astype(np.uint8)
-img2_gray = source.astype(np.uint8)
-# Create our ORB detector and detect keypoints and descriptors
-orb = cv2.ORB_create(nfeatures=2000)
-# Find the key points and descriptors with ORB
-keypoints1, descriptors1 = orb.detectAndCompute(img1_gray, None)
-keypoints2, descriptors2 = orb.detectAndCompute(img2_gray, None)
-# Create a BFMatcher object.
-# It will find all of the matching keypoints on two images
-bf = cv2.BFMatcher_create(cv2.NORM_HAMMING)
-# Find matching points
-matches = bf.knnMatch(descriptors1, descriptors2, k=2)
-all_matches = []
-for m, n in matches:
-    all_matches.append(m)
-# Finding the best matches
-good = []
-for m, n in matches:
-    if m.distance < 0.6 * n.distance:
-        good.append(m)
-# Set minimum match condition
-MIN_MATCH_COUNT = 10
-if len(good) > MIN_MATCH_COUNT:
-    # Convert keypoints to an argument for findHomography
-    src_pts = np.float32([keypoints1[m.queryIdx].pt for m in good]).reshape(-1, 1, 2)
-    dst_pts = np.float32([keypoints2[m.trainIdx].pt for m in good]).reshape(-1, 1, 2)
-    # Establish a homography
-    M, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
-
-
 def feature_CV2(destination_raw, source_raw, diroverlap, FFT_max_gaussian, high_thres):
     """This finds the overlay given A and B with feature based registration
         Args:
@@ -586,27 +544,32 @@ def registration_X(srcY, desY, X_dir, FFT_max_gaussian, error_overlap, X, Y, Z, 
 
     """
 
-    # convert percent in image overlap to number of pixels
-    input_overlap = round(srcY.shape[1] * input_overlap)
-    if X == 1 and Y == 0 and Z == 0:  # calculate the initial stitch level ONLY for first overlap
-        diroverlap = X_dir  # 'right'
-        [target_overlapX] = feature_CV2(desY, srcY, diroverlap, FFT_max_gaussian, high_thres)
-        # make sure user defined input of input_overlap, else just use calculated
-        try:
-            input_overlap
-        except NameError:
-            input_overlap = target_overlapX
-        # print warning if user defined overlap and calculated overlap different
-        if target_overlapX in range(round((input_overlap - (input_overlap * error_overlap))),
-                                    round((input_overlap + (input_overlap * error_overlap)))):
-            print("X overlap within {} % of user defined values.".format(error_overlap * 100))
-        else:
-            # print warning
-            warnings.warn(
-                "WARNING: calculated X overlap of {} not within {} % of user defined overlap of {}. Using user defined overlap.".format(
-                    target_overlapX, (error_overlap * 100), input_overlap))
-            # use user defined value instead
-            target_overlapX = input_overlap
+    if input_overlap is None:
+        if X == 1 and Y == 0 and Z == 0:  # calculate the initial stitch level ONLY for first overlap
+            diroverlap = X_dir  # 'right'
+            [target_overlapX] = feature_CV2(desY, srcY, diroverlap, FFT_max_gaussian, high_thres)
+    else:
+        # convert percent in image overlap to number of pixels
+        input_overlap = round(srcY.shape[1] * input_overlap)
+        if X == 1 and Y == 0 and Z == 0:  # calculate the initial stitch level ONLY for first overlap
+            diroverlap = X_dir  # 'right'
+            [target_overlapX] = feature_CV2(desY, srcY, diroverlap, FFT_max_gaussian, high_thres)
+            # make sure user defined input of input_overlap, else just use calculated
+            try:
+                input_overlap
+            except NameError:
+                input_overlap = target_overlapX
+            # print warning if user defined overlap and calculated overlap different
+            if target_overlapX in range(round((input_overlap - (input_overlap * error_overlap))),
+                                        round((input_overlap + (input_overlap * error_overlap)))):
+                print("X overlap within {} % of user defined values.".format(error_overlap * 100))
+            else:
+                # print warning
+                warnings.warn(
+                    "WARNING: calculated X overlap of {} not within {} % of user defined overlap of {}. Using user defined overlap.".format(
+                        target_overlapX, (error_overlap * 100), input_overlap))
+                # use user defined value instead
+                target_overlapX = input_overlap
     # calculate shift on MEAN image --> apply to whole image this helps with noisy images
     srcY_mean = np.max(srcY, axis=2)  # , dtype=srcY.dtype)
     desY_mean = np.max(desY, axis=2)  # , dtype=desY.dtype)
@@ -711,37 +674,40 @@ def registration_Y(srcZ, desZ, Y_dir, FFT_max_gaussian, error_overlap, X, Y, Z, 
         -   target_overlapY  : initial registration guess along Y
 
     """
-    # convert percent in image overlap to number of pixels
-    input_overlap = round(srcZ.shape[0] * input_overlap)
-    # pad in the Y
-    dim = 1
-    [srcZ, desZ] = zero_pad(srcZ, desZ, dim)
-    if Y == 1 and Z == 0:  # calculate the initial stitch level ONLY for first overlap
-        if Y_dir == 'top':
-            diroverlap = 'down'
-        elif Y_dir == 'bottom':
-            diroverlap = 'up'
-        [target_overlapY] = feature_CV2(desZ, srcZ, diroverlap, FFT_max_gaussian, high_thres)
-        # print warning if user defined overlap and calculated overlap different
-        if target_overlapY in range(round((input_overlap - (input_overlap * error_overlap))),
-                                    round((input_overlap + (input_overlap * error_overlap)))):
-            print("Y overlap within {} of user defined values.".format(error_overlap))
-        else:
-            # print warning
-            warnings.warn(
-                "WARNING: calculated Y overlap of {} not within {} % of user defined overlap of {}. Using user defined overlap.".format(
-                    target_overlapY, (error_overlap * 100), input_overlap))
-            # use user defined value instead
-
-            # todo set this to target_overlapX if within error of target_overlapY
-
-            target_overlapY = input_overlap
-
-
+    if input_overlap is None:
+        if Y == 1 and Z == 0:  # calculate the initial stitch level ONLY for first overlap
+            if Y_dir == 'top':
+                diroverlap = 'down'
+            elif Y_dir == 'bottom':
+                diroverlap = 'up'
+            [target_overlapY] = feature_CV2(desZ, srcZ, diroverlap, FFT_max_gaussian, high_thres)
+    else:
+        # convert percent in image overlap to number of pixels
+        input_overlap = round(srcZ.shape[0] * input_overlap)
+        # pad in the Y
+        dim = 1
+        [srcZ, desZ] = zero_pad(srcZ, desZ, dim)
+        if Y == 1 and Z == 0:  # calculate the initial stitch level ONLY for first overlap
+            if Y_dir == 'top':
+                diroverlap = 'down'
+            elif Y_dir == 'bottom':
+                diroverlap = 'up'
+            [target_overlapY] = feature_CV2(desZ, srcZ, diroverlap, FFT_max_gaussian, high_thres)
+            # print warning if user defined overlap and calculated overlap different
+            if target_overlapY in range(round((input_overlap - (input_overlap * error_overlap))),
+                                        round((input_overlap + (input_overlap * error_overlap)))):
+                print("Y overlap within {} of user defined values.".format(error_overlap))
+            else:
+                # print warning
+                warnings.warn(
+                    "WARNING: calculated Y overlap of {} not within {} % of user defined overlap of {}. Using user defined overlap.".format(
+                        target_overlapY, (error_overlap * 100), input_overlap))
+                # use user defined value instead
+                # todo set this to target_overlapX if within error of target_overlapY
+                target_overlapY = input_overlap
     # calculate shift on MEAN image --> apply to whole image this helps with noisy images
     srcZ_mean = np.max(srcZ, axis=2)  # , dtype=srcZ.dtype)
     desZ_mean = np.max(desZ, axis=2)  # , dtype=desZ.dtype)
-
     if Y_dir == 'top':
         shiftYi = -(srcZ.shape[0] - abs(target_overlapY))
     elif Y_dir == 'bottom':
