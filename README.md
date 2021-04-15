@@ -5,26 +5,66 @@ Written BY: Kaleb Vinehout:  klvinehout@gmail.com
 # About The Project:
 
     This code combines 2D images from fluorescence microscopy into a 3D volume. This involves ridgid transforms to stich together overlapping images and affine registration to combine physical non-overlapping slices. This can also be used to copy the resgitration transforms from one channel to another imaging channel. This outputs the registraation files, the registreed data as a numpy array and images of the raw and feature map registered.
-    
-    Step 1: Rigidly Register within each POS folder
+
+#### Preprocessing: Denoise
+
+        -denoise methods from scikit:  https://scikit-image.org/docs/dev/auto_examples/filters/plot_denoise.html
+        -Wavelet denoising filter: This wavelet denoising filter relies on the wavelet representation of the image. The noise is represented by small values in the wavelet domain which are set to 0.
+        -Total variation filter: We use the TV Chambolle filter. The result of this filter is an image that has a minimal total variation norm, while being as close to the initial image as possible. The total variation is the L1 norm of the gradient of the image.
+        -difference_of_gaussians: Difference of Gaussians method for applying band-pass filters to multi-dimensional arrays
+        -denoise_nl_means: The non-local means algorithm is well suited for denoising images with specific textures. The principle of the algorithm is to average the value of a given pixel with values of other pixels in a limited neighbourhood
+
+Image Raw data:
+![](images_readme/raw_file.png)
+
+Image data after band-pass filter:
+![](images_readme/band_pass.png)
+
+Image data after Wavelet denoising filter:
+![](images_readme/denoise_wave.png)
+
+Image of after non-local means:
+![](images_readme/Non_localmeans.png)
+
+Image of after Total variation filter:
+![](images_readme/TVnorm.png)
+
+#### Step 1: Rigidly Register within each POS folder
+
         - Use phase correlation to register within optical slice
         - If values are non-zero denoiseing is perfomred
             -Phase correlation performed on denoised values
-    
-    Step 2: Rigidly Stitch together X and Y to create physical slice Z plane
+
+#### Step 2: Rigidly Stitch together X and Y to create physical slice Z plane
+
         - Use open CV feautre detection or user provided value to determine rough image overlap (or use user provied value)
         - Image overlaping areas are phase correlated to determine translation
         - default image overlap is applied to blank images
         -If images are shifted greater then error tolerance images are denoised
             -phase correlation on these denoised images, this is useful if few blood vessels in image
-    
-    
-    Step 3: Register Z planes together
+
+Image of feature-based registration:
+![](images_readme/matches.jpg)
+
+Image of after X stitching registration:
+![](images_readme/Yline_denoise.png)
+
+Image of after X & Y stitching registration:
+![](images_readme/Z_img_denoise.png)
+
+#### Step 3: Register Z planes together
+
         - denoise the Z plane image
         - segment the Z plane image
         - determine angle rotation with polar and log polar transfomations
         - deterimine translation with phase correlation of segmented images
         - use optical flow registration for non-linear aligment of Z planes 
+
+Image of after denoise:
+![](images_readme/Zplane_denoise.png)
+
+Image of after segmentation:
+![](images_readme/Zplane_feature.png)
 
 # PREREQUISITE:
 
@@ -32,19 +72,22 @@ Written BY: Kaleb Vinehout:  klvinehout@gmail.com
 
 # ASSUMPTIONS:
 
-    -overlap in X is same for all cubes within defined error (suggested 10%)
-    -overlap in Y is same for all cubes within defined error (suggested 10%)
+    -overlap in X is same for all cubes within defined error (suggested 15%)
+    -overlap in Y is same for all cubes within defined error (suggested 15%)
 
 # INPUTS:
 
-## These are REQUIRED inputs arguments
+#### These are REQUIRED inputs arguments
     --seq_dir: This is used to define the order of folders representing physical slices. Here set equal to 'top' if POS1 is above POS 0 and 'bottom' if POS 1 is below POS 0 (EX: --seq_dir='top')
     --image_type: This is the file name prefex of images to register (img_000000000_Il-A_000.tif)  Note its assumed optical Z number is after this label in the image name (ex:'--image_type = 'Il-A')
     --localsubjectpath: This is full path where to load and save files  (ex:' --localsubjectpath='/grid/zador/home/vinehout/code/2d_3D_linear_reg/')
     --remotesubjectpath: This is full path where to files are located eaither locally (ex:--remotesubjectpath='/grid/zador/home/vinehout/code/2d_3D_linear_reg/data') or on remote server (ex:--remotesubjectpath='/home/imagestorage/lectin_1/')
 
-## These are optional input arguments
+#### These are optional but suggested input arguments
     --input_overlap: Percent image overlap. 0-1, 0.10 represents 10 percent. (ex:--input_overlap=0.10) Feature based registration is used if this value is not given.
+
+#### These are optional input arguments
+
     --opticalZ_dir: This defines the direction the images are stacked within a given folder. For example within folder Pos7_004_000 if the image img_000000000_Il-A_001.tif is on 'top' of img_000000000_Il-A_000.tif image or if img_000000000_Il-A_001.tif is on 'bottom' of img_000000000_Il-A_000.tif. This input can eaither be 'top' or 'bottom' (ex: --opticalZ_dir='top') (default: 'top'") choices=['top', 'bottom']
     --X_dir: This defines the X direction to stich images together (either shift images to the left or right). This value is defined based on the location of X=0, use 'left' if X=0 is on the left side of the physical slice or 'right' if X=0 is on the right side. (ex:--X_dir='right') (default='right') choices=['left', 'right']
     --Y_dir: This defines the Y direction to stich images together (either shift images to the top or bottom). This value is defined based on the location of Y=0, use 'top' if Y=0 is on the top of the physical slice or 'bottom' if X=0 is on the bottom. (ex:--X_dir='top') (default='top') choices=['top', 'bottom']
@@ -72,7 +115,6 @@ Written BY: Kaleb Vinehout:  klvinehout@gmail.com
     --denoise_all:This is used to output a denoise array that is the same size as the full dataset. If set to false the denoise array is only the images used for registration. (ex:--denoise_all=True)(default:True)
 
 # OUTPUTS:
-
     -outputs are saved under 'localsubjectpath/registration'
     -reg_3Dimage: numpy array of 3D brain
     -3D_brain_rotate: .gif of roating 3D brain based on features
@@ -80,7 +122,6 @@ Written BY: Kaleb Vinehout:  klvinehout@gmail.com
     - *target_overlapX.npy, *target_overlapY.npy, *shift_within.npy, *shiftX.npy, *shiftY.npy, *shiftZ.npy : these are the registration value that can be used on another channel to provide same registration as applied to this image
 
 # FILES:
-
     -docker: This is to create docker file with versions of all software packages used 
     -Main_2d_3d.py: main python script
     -func_2d_3d.py: functions for main file
@@ -90,10 +131,11 @@ Written BY: Kaleb Vinehout:  klvinehout@gmail.com
 # USEAGE:
 
     #this converts 2D barseq data into 2D barseq data
-    python Main_2d_3d.py --remotesubjectpath='/home/imagestorage/ZadorConfocal1/xiaoyin/20201205JB050tomatolectinlabeling647/lectin_1/' --localsubjectpath='/grid/zador/home/vinehout/code/2d_3D_linear_reg/' --X_dir='right' --Y_dir='top' --image_type='Il-A' --seq_dir='top' --opticalZ_dir='top' --input_overlap=287 --server='zadorstorage2.cshl.edu' --user='imageguest' --password='zadorlab'
+    python Main_2d_3d.py --remotesubjectpath='/home/imagestorage/ZadorConfocal1/xiaoyin/20201205JB050tomatolectinlabeling647/lectin_1/' --localsubjectpath='/grid/zador/home/vinehout/code/2d_3D_linear_reg/' --X_dir='right' --Y_dir='top' --image_type='Il-A' --seq_dir='top' --opticalZ_dir='top' --input_overlap=0.15 --server='zadorstorage2.cshl.edu' --user='user1' --password='password'
     #this applys registration transfromation to different channel data 
-    python Main_2d_3d.py --remotesubjectpath='/home/imagestorage/ZadorConfocal1/xiaoyin/20201205JB050tomatolectinlabeling647/lectin_1/' --localsubjectpath='/grid/zador/home/vinehout/code/2d_3D_linear_reg/' --X_dir='right' --Y_dir='top' --image_type='X1' --seq_dir='top' --opticalZ_dir='top' --input_overlap=287 --server='zadorstorage2.cshl.edu' --user='imageguest' --password='zadorlab'   --apply_transform=True --saved_transforms_path='/Users/kaleb/Documents/CSHL/ML_basecalling/code/2d_3D_linear_reg/registration/Il-A'
-
+    python Main_2d_3d.py --remotesubjectpath='/home/imagestorage/ZadorConfocal1/xiaoyin/20201205JB050tomatolectinlabeling647/lectin_1/' --localsubjectpath='/grid/zador/home/vinehout/code/2d_3D_linear_reg/' --X_dir='right' --Y_dir='top' --image_type='X1' --seq_dir='top' --opticalZ_dir='top' --input_overlap=0.15 --server='zadorstorage2.cshl.edu' --user='user1' --password='password' --apply_transform=True --saved_transforms_path='/Users/kaleb/Documents/CSHL/ML_basecalling/code/2d_3D_linear_reg/registration/Il-A'
+    # this is useage for multiple folders of data 
+    python Main_2d_3d.py --remotesubjectpath='/home/imagestorage/xichen/20210308BaylorSample1/lectin_131415_1/' --remotesubjectpath='/home/imagestorage/xichen/20210308BaylorSample1/lectin_161718_1/' --localsubjectpath='/Users/kaleb/Documents/CSHL/2d_3D_linear_reg/' --image_type='Il-A' --X_dir='right' --Y_dir='top' --seq_dir='top' --opticalZ_dir='bottom' --input_overlap=0.15 --server='zadorstorage4.cshl.edu' --user='user1' --password='password' --output='registration_save' --extra_figs=False --max_Z_proj_affine=False --find_rot=True --rigid_2d3d=False --denoise_all=True
 
 
 
