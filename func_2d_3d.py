@@ -244,6 +244,9 @@ def denoise(A, FFT_max_gaussian, high_thres):
     # differance of gaussian again
     filt_B = skimage.filters.difference_of_gaussians(denoise, 1, FFT_max_gaussian)
     denoised = filt_B
+    # convert to image if need be
+    if denoised.max() < 1:
+        denoised = skimage.img_as_uint(denoised, force_copy=False)
     # denoise=np.abs(denoise) remoove?
     # todo only do this if noise level is high??? https://github.com/meisamrf/ivhc-estimator/blob/master/Python/demo.ipynb
     # this is a way to try a bunch of wavlet denoise options and use best:

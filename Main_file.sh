@@ -9,8 +9,6 @@ pwd
 python Main_2d_3d.py --remotesubjectpath='/home/imagestorage/xichen/20210308BaylorSample1/lectin_131415_1/' --remotesubjectpath='/home/imagestorage/xichen/20210308BaylorSample1/lectin_161718_1/' --localsubjectpath='/Users/kaleb/Documents/CSHL/2d_3D_linear_reg/' --image_type='Il-A' --X_dir='right' --Y_dir='top' --seq_dir='top' --opticalZ_dir='bottom' --input_overlap=0.15 --server='zadorstorage4.cshl.edu' --user='imageguest' --password='zadorlab' --output='registration_save' --extra_figs=False --max_Z_proj_affine=False --find_rot=True --rigid_2d3d=False --denoise_all=True
 
 
-
-
 #--rigid_2d3d=True  --apply_transform=True --saved_transforms_path='/grid/zador/home/vinehout/code/2d_3D_linear_reg/registration/Il-A'
 
 

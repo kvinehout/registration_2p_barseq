@@ -40,7 +40,7 @@ Step 3: Register Z planes together
     - segment the Z plane image
     - determine angle rotation with polar and log polar transfomations
     - deterimine translation with phase correlation of segmented images
-    - use optical flow registration for non-linear aligment of Z planes 
+    - use optical flow registration for non-linear aligment of Z planes
 
 
 
@@ -189,6 +189,7 @@ def main(args):
     # append values?
     # memorize function? --> only if use same input multipel times... basically makes dictionary
     # use hashing to store variables?
+    count_Z_folder = 0  # this counts for all Z folder
     for pathi in range(int(args.remotesubjectpath.__len__())):
         remotesubjectpath_one = args.remotesubjectpath[pathi]
         print(remotesubjectpath_one)
@@ -242,7 +243,7 @@ def main(args):
         del ALLCubeZ
         # for each Z value
         for Z_one in range(int(MaxCubeZ) + 1):
-            Z = Z_one + (pathi * (int(MaxCubeZ) + 1))
+            Z = count_Z_folder
             print("Z = {}".format(Z))
             # get maximum X and Y in case X/Y plane different size for each Z
             ALLCubeX = np.zeros(len(cubefolder))
@@ -387,10 +388,7 @@ def main(args):
                                                                                                                   Z))
                         else:
                             if args.denoise_all:
-                                srcY_T_re_denoise = [
-                                    func2d3d.denoise(srcY_T_re[:, :, i], args.FFT_max_gaussian, args.high_thres) for i
-                                    in range(srcY_T_re.shape[2])]
-                                srcY_T_re_denoise = np.transpose(srcY_T_re_denoise, axes=[1, 2, 0])
+                                srcY_T_re_denoise = func2d3d.denoise(srcY_T_re, args.FFT_max_gaussian, args.high_thres)
                             else:
                                 srcY_T_re_denoise = func2d3d.denoise(srcY_T_re_one, args.FFT_max_gaussian,
                                                                      args.high_thres)
@@ -411,9 +409,7 @@ def main(args):
                         del srcY_T, SKI_Trans_all, srcY, srcY_T_re_one
                         if X == 1:
                             if args.denoise_all:
-                                desY_denoise = [func2d3d.denoise(desY[:, :, i], args.FFT_max_gaussian, args.high_thres)
-                                                for i in range(desY.shape[2])]
-                                desY_denoise = np.transpose(desY_denoise, axes=[1, 2, 0])
+                                desY_denoise = func2d3d.denoise(desY, args.FFT_max_gaussian, args.high_thres)
                             else:
                                 desY_denoise = func2d3d.denoise(desY_one, args.FFT_max_gaussian, args.high_thres)
                             # concat 3D volumes together
@@ -698,6 +694,7 @@ def main(args):
                 d3_array_feature = d3_img_feature
                 Zplane_old = Zplane
                 del Zplane, d3_img, d3_img_feature, d3_img_denoise
+            count_Z_folder = count_Z_folder + 1
     # DO THIS AFTER ALL folders
     del Zplane_old
     # print out error and shift to terminal
