@@ -7,7 +7,6 @@ Created on Nov 24th 2020
 
 This code combines 2D data into 3d volume, functions for this code
 """
-import math
 import operator
 import os
 import re
@@ -15,6 +14,7 @@ import warnings
 from shutil import copyfile
 # import ants
 import matplotlib.pyplot as plt
+import matplotlib
 import numpy as np
 # import modules
 import paramiko
@@ -30,6 +30,25 @@ from sklearn.neighbors import NearestNeighbors
 import cv2
 import imreg_dft as ird
 import math
+from matplotlib import gridspec
+from skimage.data import chelsea, hubble_deep_field
+from skimage.metrics import mean_squared_error as mse
+from skimage.metrics import peak_signal_noise_ratio as psnr
+from skimage.restoration import (calibrate_denoiser, denoise_wavelet, denoise_tv_chambolle, denoise_nl_means,
+                                 estimate_sigma)
+from skimage.util import img_as_float, random_noise
+from skimage.color import rgb2gray
+from functools import partial
+from skimage.restoration.j_invariant import _invariant_denoise
+import matplotlib.patches as mpatches
+from skimage.filters import threshold_otsu
+from skimage.segmentation import clear_border
+from skimage.measure import label, regionprops
+from skimage.morphology import closing, square, binary_dilation, disk, square, area_opening, opening
+from skimage.color import label2rgb
+import itk
+from skimage.filters import threshold_multiotsu
+import matplotlib
 
 
 # import ICP
@@ -162,6 +181,351 @@ def multi_slice_viewer(volume):
     return
 
 
+def remove_large_obj(A, area_thres, int_thres, FFT_max_gaussian, high_thres_dec):
+    """
+        This
+        removes
+        large and high
+        intensity
+        objects
+        from image
+        # area_thres = 10000 or X% of image
+        # int_thres = 10000 or X% greater then median
+        # 21743 is with object adn 1015 is without object
+        # remove large objects (if needed)
+    """
+    filt_A = skimage.filters.difference_of_gaussians(A, 1, FFT_max_gaussian)
+    # denoise with wavlet this might not have much of an effect
+    denoise = skimage.restoration.denoise_wavelet(filt_A, multichannel=False, rescale_sigma=True)
+    # set stuff below mean to zero? --> for some reason this works best
+    low_values_flags = denoise < np.median(denoise)
+    denoise[low_values_flags] = 0
+    image = denoise
+    # apply threshold
+    thresh = 2 * np.median(denoise)  # 1000 #threshold_otsu(image)
+    bw = closing(image > thresh, square(3))
+    # remove artifacts connected to image border
+    cleared = clear_border(bw)
+    dialted = binary_dilation(cleared, selem=None)
+    # dialted = binary_dilation(dialted1, selem=square(300))
+    # label image regions
+    label_image = label(dialted)
+    # to make the background transparent, pass the value of `bg_label`,
+    # and leave `bg_color` as `None` and `kind` as `overlay`
+    image_label_overlay = label2rgb(label_image, image=A, bg_label=0)
+    for region in regionprops(label_image, intensity_image=A):
+        # take regions with large enough areas
+        if region.area >= area_thres and region.max_intensity >= int_thres:
+            warnings.warn(message='Large high intensity artifact found, removing artifact')
+            # define this as a mask to REMOVE from image
+            # for this box set value to zero? mean? median?
+            (min_row, min_col, max_row, max_col) = region.bbox
+            high_values_flags = np.array(np.zeros(A.shape), dtype=bool)
+            # add 10% to boundry box
+            buffer_row = (max_row - min_row) * (high_thres_dec * 2)
+            buffer_col = (max_col - min_col) * (high_thres_dec * 2)
+            min_row_shift = round(min_row - buffer_row)
+            max_row_shift = round(max_row + buffer_row)
+            min_col_shift = round(min_col - buffer_col)
+            max_col_shift = round(max_col + buffer_col)
+            if min_col_shift < 0:
+                min_col_shift = 0
+            if min_row_shift < 0:
+                min_row_shift = 0
+            if max_col_shift > A.shape[1]:
+                max_col_shift = A.shape[1]
+            if max_row_shift > A.shape[0]:
+                max_row_shift = A.shape[0]
+            high_values_flags[min_row_shift:max_row_shift, min_col_shift:max_col_shift] = True
+            A[high_values_flags] = np.median(A)
+            # draw rectangle around segmented coins
+            minr, minc, maxr, maxc = region.bbox
+            rect = mpatches.Rectangle((minc, minr), maxc - minc, maxr - minr, fill=False, edgecolor='red', linewidth=2)
+    mask_A_raw = A
+    mask_A = np.array(mask_A_raw)
+    return mask_A
+
+
+def denoise_noise2self(A, FFT_max_gaussian, high_thres):
+    # try noise2noise traiing? https://github.com/czbiohub/noise2self
+    """
+    noisy_image = imarray3D_mean_512
+    import sys
+    sys.path.append("..")
+    from util import show, plot_images, plot_tensors
+    from torchvision.datasets import MNIST
+    from torchvision import transforms
+    from torch.utils.data import Dataset
+    mnist_train = MNIST('../data/MNIST', download=True,
+                        transform=transforms.Compose([
+                            transforms.ToTensor(),
+                        ]), train=True)
+    mnist_test = MNIST('../data/MNIST', download=True,
+                       transform=transforms.Compose([
+                           transforms.ToTensor(),
+                       ]), train=False)
+    from torch import randn
+    def add_noise(img):
+        return img + randn(img.size()) * 0.4
+
+    class SyntheticNoiseDataset(Dataset):
+        def __init__(self, data, mode='train'):
+            self.mode = mode
+            self.data = data
+
+        def __len__(self):
+            return len(self.data)
+
+        def __getitem__(self, index):
+            img = self.data[index][0]
+            return add_noise(img), img
+
+    noisy_mnist_train = SyntheticNoiseDataset(mnist_train, 'train')
+    noisy_mnist_test = SyntheticNoiseDataset(mnist_test, 'test')
+
+    noisy, clean = noisy_mnist_train[0]
+    plot_tensors([noisy[0], clean[0]], ['Noisy Image', 'Clean Image'])
+    from mask import Masker
+    masker = Masker(width=4, mode='interpolate')
+    net_input, mask = masker.mask(noisy.unsqueeze(0), 0)
+    plot_tensors([mask, noisy[0], net_input[0], net_input[0] - noisy[0]],
+                 ["Mask", "Noisy Image", "Neural Net Input", "Difference"])
+    from models.babyunet import BabyUnet
+    model = BabyUnet()
+
+    from torch.nn import MSELoss
+    from torch.optim import Adam
+    from torch.utils.data import DataLoader
+
+    loss_function = MSELoss()
+    optimizer = Adam(model.parameters(), lr=0.001)
+
+    data_loader = DataLoader(noisy_mnist_train, batch_size=32, shuffle=True)
+
+
+
+    for i, batch in enumerate(data_loader):
+        noisy_images, clean_images = batch
+
+        net_input, mask = masker.mask(noisy_images, i)
+        net_output = model(net_input)
+
+        loss = loss_function(net_output * mask, noisy_images * mask)
+
+        optimizer.zero_grad()
+
+        loss.backward()
+
+        optimizer.step()
+
+        if i % 10 == 0:
+            print("Loss (", i, "): \t", round(loss.item(), 4))
+
+        if i == 100:
+            break
+
+    test_data_loader = DataLoader(noisy_mnist_test,
+                                  batch_size=32,
+                                  shuffle=False,
+                                  num_workers=3)
+    i, test_batch = next(enumerate(test_data_loader))
+    noisy, clean = test_batch
+
+    simple_output = model(noisy)
+    invariant_output = masker.infer_full_image(noisy, model)
+
+    idx = 18
+    plot_tensors([clean[idx], noisy[idx], simple_output[idx], invariant_output[idx]],
+                 ["Ground Truth", "Noisy Image", "Single Pass Inference", "J-Invariant Inference"])
+
+    print("Test loss, single pass: ", round(loss_function(clean, simple_output).item(), 3))
+    print("Test loss, J-invariant: ", round(loss_function(clean, invariant_output).item(), 3))
+
+
+
+    #this is self with only one data.... doesnt learn
+
+    import sys
+    sys.path.append("..")
+    from util import show, plot_images, plot_tensors
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from skimage.morphology import disk
+    from skimage.filters import gaussian, median,
+    from skimage import data, img_as_float, img_as_ubyte
+    from skimage.color import gray2rgb
+    from skimage.util import random_noise
+    #from skimage.measure import compare_psnr
+    #plt.rc('figure', figsize=(5, 5))
+    #image = img_as_float(data.camera())
+    #show(image)
+    #np.random.seed(3)
+    #noisy_image = random_noise(image, mode='gaussian', var=0.01)
+    #show(noisy_image)
+    noisy_image = imarray3D_mean  # _512
+
+
+
+    import torch
+    noisy = torch.Tensor(noisy_image[np.newaxis, np.newaxis])
+    from util import getbestgpu
+    #device = getbestgpu()
+    from mask import Masker
+    masker = Masker(width=4, mode='interpolate')
+
+    torch.manual_seed(3)
+    from models.dncnn import DnCNN
+    model = DnCNN(1, num_of_layers=8)
+    sum(p.numel() for p in model.parameters() if p.requires_grad)
+    image.ravel().shape
+    from torch.nn import MSELoss, L1Loss
+    from torch.optim import Adam
+
+    loss_function = MSELoss()
+    optimizer = Adam(model.parameters(), lr=0.01)
+    model = model.to()#model = model.to(device)
+    noisy = noisy.to()#noisy = noisy.to(device)
+
+    losses = []
+    val_losses = []
+    best_images = []
+    best_val_loss = 1
+
+
+
+    #this is modified for my image????
+    from mask import Masker
+    masker = Masker()
+    for i, batch in enumerate(data_loader):
+        noisy_images, _ = batch
+        input, mask = masker.mask(noisy_images, i)
+        output = model(input)
+        loss = loss_function(output * mask, noisy_images * mask)
+
+
+
+
+    for i in range(500):
+        model.train()
+
+        net_input, mask = masker.mask(noisy, i % (masker.n_masks - 1))
+        net_output = model(net_input)
+
+        loss = loss_function(net_output * mask, noisy * mask)
+        optimizer.zero_grad()
+
+        loss.backward()
+
+        optimizer.step()
+
+        if i % 10 == 0:
+            losses.append(loss.item())
+            model.eval()
+
+            net_input, mask = masker.mask(noisy, masker.n_masks - 1)
+            net_output = model(net_input)
+
+            val_loss = loss_function(net_output * mask, noisy * mask)
+
+            val_losses.append(val_loss.item())
+
+            print("(", i, ") Loss: \t", round(loss.item(), 5), "\tVal Loss: \t", round(val_loss.item(), 5))
+
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                denoised = np.clip(model(noisy).detach().cpu().numpy()[0, 0], 0, 1).astype(np.float64)
+                best_images.append(denoised)
+    denoised = best_images[-1]
+    """
+    return denoised
+
+
+def denoise(A, FFT_max_gaussian, high_thres):
+    """
+    This denoises the data with the optimal of wavlet, TV norm, or non-local means
+        Args:
+        -A Numpy array to be denoised
+        - high_thres: this is the threshold to very high values
+        -FFT_max_gaussian: this if high sigma for difference of gausian
+        Returns:
+        -	denoised: denoised image
+
+    """
+    sigma_est_ori = np.mean(skimage.restoration.estimate_sigma(A, multichannel=False))
+    print(f"estimated noise standard deviation = {sigma_est_ori}")
+    # remove extremely high values --> remove hair
+    if (A > (high_thres * A.mean())).any() and A.ndim == 2:
+        warnings.warn(message='High intensity Image detected')
+        high_thres_dec = high_thres / 100
+        # remove whole connected image to this
+        int_thres = (high_thres * A.mean())
+        area_thres = A.shape[1] * (high_thres_dec / 2)
+        A = remove_large_obj(A, area_thres, int_thres, FFT_max_gaussian, high_thres_dec)
+        # remove extra dimensions
+        A = np.squeeze(A)
+
+    # remove salt and peper with TV norm, wavlet or non-local means
+    # calibrate TV norm
+    parameter_ranges_tv = {'weight': np.arange(0.1, 0.3, 0.5), 'eps': np.arange(0.0002, 0.001, 0.04),
+                           'n_iter_max': np.arange(200, 300, 100), 'multichannel': [False]}
+    _, (parameters_tested_tv, losses_tv) = calibrate_denoiser(A, denoise_tv_chambolle,
+                                                              denoise_parameters=parameter_ranges_tv, extra_output=True)
+    best_parameters_tv = parameters_tested_tv[np.argmin(losses_tv)]
+    denoised_calibrated_tv = _invariant_denoise(A, denoise_tv_chambolle, denoiser_kwargs=best_parameters_tv)
+    print(f'Minimum self-supervised loss TV: {np.min(losses_tv):.4f}')
+    # calibrate wavelet
+    parameter_ranges_wavelet = {'wavelet': ['db1', 'db2', 'haar'], 'convert2ycbcr': [False], 'multichannel': [False],
+                                'rescale_sigma': [True], 'mode': ['soft'], 'method': ['BayesShrink']}
+    _, (parameters_tested_wavelet, losses_wavelet) = calibrate_denoiser(A, denoise_wavelet,
+                                                                        parameter_ranges_wavelet, extra_output=True)
+    best_parameters_wavelet = parameters_tested_wavelet[np.argmin(losses_wavelet)]
+    denoised_calibrated_wavelet = _invariant_denoise(A, denoise_wavelet, denoiser_kwargs=best_parameters_wavelet)
+    print(f'Minimum self-supervised loss wavelet: {np.min(losses_wavelet):.4f}')
+    # calibrate nl means
+    sigma_est = estimate_sigma(A)
+    parameter_ranges_nl = {'h': np.arange(1.15, 2, 5) * sigma_est, 'patch_size': np.arange(5, 10, 5),
+                           'patch_distance': np.arange(6, 10, 5), 'multichannel': [False], 'fast_mode': [True],
+                           'preserve_range': [True]}
+    _, (parameters_tested_nl, losses_nl) = calibrate_denoiser(A, denoise_nl_means, parameter_ranges_nl,
+                                                              extra_output=True)
+    best_parameters_nl = parameters_tested_nl[np.argmin(losses_nl)]
+    denoised_calibrated_nl = _invariant_denoise(A, denoise_nl_means, denoiser_kwargs=best_parameters_nl)
+    print(f'Minimum self-supervised loss NL means: {np.min(losses_nl):.4f}')
+    Low_methods = [np.min(losses_tv), np.min(losses_wavelet), np.min(losses_nl)]
+    if Low_methods.index(min(Low_methods)) == 0:
+        print(f'Method Minimum self-supervised loss is for TV: {np.min(losses_tv):.4f}')
+        denoised1 = denoised_calibrated_tv
+    elif Low_methods.index(min(Low_methods)) == 1:
+        print(f'Method Minimum self-supervised loss is for wavelet: {np.min(losses_wavelet):.4f}')
+        denoised1 = denoised_calibrated_wavelet
+    elif Low_methods.index(min(Low_methods)) == 2:
+        print(f'Method Minimum self-supervised loss is for NL means: {np.min(losses_nl):.4f}')
+        denoised1 = denoised_calibrated_nl
+    else:
+        warnings.warn(message='Optimal denoise failed')
+        denoised1 = A
+
+    denoised1 = skimage.util.img_as_float(denoised1)
+
+    # after salt and peper removed with above then use rolling-ball b/c rolling ball sensitive to salt/pepper.
+    # remove lighting effects with rolling ball -- this removes too much of the data
+    # background = skimage.restoration.rolling_ball(denoised1)
+    # denoised = denoised1 - background
+    # replace with difference of gausian?
+
+    denoised = skimage.filters.difference_of_gaussians(denoised1, 1, FFT_max_gaussian)
+
+    # if all values in image are the same value set blank image to zero (should be the case already)
+    if denoised.all() == denoised.max():
+        warnings.warn(message='Blank denoise image')
+
+    # if less then one --> #identify blank image?? does it matter??? why?
+    if np.max(denoised) < 1:
+        denoised = skimage.img_as_uint(denoised, force_copy=False)
+
+    return denoised
+
+
 def store_evolution_in(lst):
     """Returns a callback function to store the evolution of the level sets in
     the given list. THIS IS USED FOR SEGMENTATION
@@ -173,110 +537,85 @@ def store_evolution_in(lst):
     return _store
 
 
-def segmentation(A, checkerboard_size, seg_interations, seg_smooth):
+def remove_zero_segmntation(A_seg, A, Z):
+    """Find is one segmented image has all zeros, if so then replace
+    """
+    # find if one segmentation has all zeros, if so then replace zero segmentation with lowest segmenation
+    seg_values_max = np.ones(A_seg.max() + 1)
+    seg_values_min = np.ones(A_seg.max() + 1)
+    all_zero_seg = []
+    for count in range(A_seg.max() + 1):
+        seg_values_max[count] = np.max(A[np.where(A_seg == count)])
+        seg_values_min[count] = np.min(A[np.where(A_seg == count)])
+        if seg_values_max[count] == 0 and seg_values_min[count] == 0:
+            all_zero_seg.append(count)
+    for i in range(len(all_zero_seg)):
+        count = all_zero_seg[i]
+        # change seg_values_min to doesnt have count value
+        seg_values_min_new = np.delete(seg_values_min, count, axis=0)
+        replace_value = np.where(seg_values_min == (seg_values_min_new[seg_values_min_new.argmin()]))
+        A_seg[np.where(A_seg == count)] = replace_value
+        if i > 0:
+            warnings.warn(
+                "Warning: Z image {} segmentation detection of multiple segmnataion with zero value, this should not hapen ".format(
+                    str(Z)))
+    return A_seg, all_zero_seg
+
+
+def segmentation(A, checkerboard_size, seg_interations, seg_smooth, localsubjectpath, Z, segment_otsu):
     """
     This segments the image with chan vase
         Args:
         - A Numpy array to be segmented
-        - seg_interations: number of interations for segmentation
-        - checkerboard_size:  size of checkerboard for segmentatioin
-        -seg_smooth: number of smoothing/iterations for segmentation 
+        - seg_interations: number of interations for chan_vese segmentation
+        - checkerboard_size:  size of checkerboard for chan_vese segmentatioin
+        -seg_smooth: number of smoothing/iterations for chan_vese segmentation
         Returns:
-        -	A_seg: segmented image
-        -   A_bin: binarized image
+        -   A_seg: segmented image
 
     """
-    # Initial level set
-    init_ls = skimage.segmentation.checkerboard_level_set(A.shape, checkerboard_size)  # default is 5
-    # List with intermediate results for plotting the evolution
-    evolution = []
-    callback = store_evolution_in(evolution)
-    # smoothing of 3 works
-    A_seg = skimage.segmentation.morphological_chan_vese(A, seg_interations, init_level_set=init_ls,
-                                                         smoothing=seg_smooth,
-                                                         iter_callback=callback)  # here 35 is the number of iterations and smoothing=3 is number of times smoothing applied/iteration
 
-    # A_close=skimage.morphology.closing(A_seg, skimage.morphology.square(20))
-    # A_seg = skimage.segmentation.clear_border(A_seg)  # this removes segmentation on edge
-    # binarize imaage
-    thresh = skimage.filters.threshold_otsu(A_seg)
-    A_bin = A_seg > thresh
+    np.save(localsubjectpath + 'Z=' + str(Z) + '_denoise_for_segmentation', A)
 
+    if segment_otsu:
+        # get threshold values for binary image (b/c only 2 classes)
+        thresholds = threshold_multiotsu(A, classes=2)
+        # Using the threshold values, we generate the three regions.
+        A_seg = np.digitize(A, bins=thresholds)
+        A_seg, all_zero_seg = remove_zero_segmntation(A_seg, A, Z)
+        if len(all_zero_seg):  # use 3 classes if zero segmentation exisits
+            thresholds = threshold_multiotsu(A, classes=3)
+            A_seg = np.digitize(A, bins=thresholds)
+            A_seg, all_zero_seg = remove_zero_segmntation(A_seg, A, Z)
+    else:
+        # Initial level set
+        init_ls = skimage.segmentation.checkerboard_level_set(A.shape, checkerboard_size)  # default is 5
+        # List with intermediate results for plotting the evolution
+        evolution = []
+        callback = store_evolution_in(evolution)
+        # smoothing of 3 works
+        A_seg = skimage.segmentation.morphological_chan_vese(A, seg_interations, init_level_set=init_ls,
+                                                             smoothing=seg_smooth,
+                                                             iter_callback=callback)  # here 35 is the number of iterations and smoothing=3 is number of times smoothing applied/iteration
+        # remove segmentation if all zeros
+        A_seg, all_zero_seg = remove_zero_segmntation(A_seg, A, Z)
+        if len(all_zero_seg):  # use otsu 3 classes if zero segmentation exisits
+            warnings.warn(
+                "Warning: Z image {} segmentation of all zeros deteccted, using otsu segmentation with 3 classes ".format(
+                    str(Z)))
+            thresholds = threshold_multiotsu(A, classes=3)
+            A_seg = np.digitize(A, bins=thresholds)
+            A_seg, all_zero_seg = remove_zero_segmntation(A_seg, A, Z)
     # check to make sure background =0 and segment brain is =1
-    if np.count_nonzero(A_bin == 1) > np.count_nonzero(A_bin == 0):
+    if np.count_nonzero(A_seg == A_seg.max()) > np.count_nonzero(A_seg == 0):
         # inverse image
-        A_bin = 1 - A_bin
+        A_seg = A_seg.max() - A_seg
+        warnings.warn(
+            "Warning: Z image {} segmentation of background labeled high, inverting segmentation ".format(str(Z)))
+    return A_seg
 
-    return A_bin
 
-
-def denoise(A, FFT_max_gaussian, high_thres):
-    """
-    This denoise data with difference of gausian , wavlet, non-local means and TV norm
-        Args:
-        -	A Numpy array to be denoised
-        - high_thres: this is the threshold to very high values
-        -FFT_max_gaussian: this if high sigma for difference of gausian
-        Returns:
-        -	denoised: denoised image
-    """
-    sigma_est_ori = np.mean(skimage.restoration.estimate_sigma(A, multichannel=True))
-    print(f"estimated noise standard deviation = {sigma_est_ori}")
-    # remove extremely high values
-    high_values_flags = A > high_thres * A.mean()
-    A[high_values_flags] = 0
-    # use band pass filtering to remove shadow
-    filt_A = skimage.filters.difference_of_gaussians(A, 1, FFT_max_gaussian)
-    # denoise with wavlet
-    denoise_wave = skimage.restoration.denoise_wavelet(filt_A, sigma=None, wavelet='haar', mode='soft',
-                                                       wavelet_levels=None, multichannel=False, convert2ycbcr=False,
-                                                       method='BayesShrink', rescale_sigma=True)
-    # Non - localmeans
-    sigma_est = np.mean(skimage.restoration.estimate_sigma(denoise_wave, multichannel=True))
-    patch_kw = dict(patch_size=5,  # 5x5 patches
-                    patch_distance=6,  # 13x13 search area
-                    multichannel=True)
-    denoise_nl_mean = skimage.restoration.denoise_nl_means(denoise_wave, h=1.15 * sigma_est, fast_mode=False,
-                                                           preserve_range=True, **patch_kw)
-    # TV norm
-    denoise = skimage.restoration.denoise_tv_chambolle(denoise_nl_mean, weight=0.1, eps=0.0002, n_iter_max=200,
-                                                       multichannel=False)
-    # differance of gaussian again
-    filt_B = skimage.filters.difference_of_gaussians(denoise, 1, FFT_max_gaussian)
-    denoised = filt_B
-    # convert to image if need be
-    if denoised.max() < 1:
-        denoised = skimage.img_as_uint(denoised, force_copy=False)
-    # denoise=np.abs(denoise) remoove?
-    # todo only do this if noise level is high??? https://github.com/meisamrf/ivhc-estimator/blob/master/Python/demo.ipynb
-    # this is a way to try a bunch of wavlet denoise options and use best:
-    # https://scikit-image.org/docs/dev/auto_examples/filters/plot_j_invariant_tutorial.html#sphx-glr-auto-examples-filters-plot-j-invariant-tutorial-py
-    # low_values_flags = denoise < denoise.mean()/2
-    # denoise[low_values_flags] = 0
-    # this removes small bright and dark spots
-    # med = skimage.filters.median(denoise, skimage.morphology.disk(7))
-    # filt_B = skimage.filters.difference_of_gaussians(med, 1, FFT_max_gaussian)
-    # skimage.morphology.area_closing(denoise, area_threshold=3, connectivity=1, parent=None, tree_traverser=None)
-    # skimage.morphology.area_opening(image, area_threshold=3, connectivity=1, parent=None, tree_traverser=None)
-    # filt_B = skimage.filters.difference_of_gaussians(denoise, 1, FFT_max_gaussian)
-    # test = denoise - filt_B
-    # segmentation: https://scikit-image.org/docs/0.18.x/auto_examples/segmentation/plot_morphsnakes.html#sphx-glr-auto-examples-segmentation-plot-morphsnakes-py
-    # or try antss denoise: ants.denoise_image
-    # imagedenoise = ants.denoise_image(imagenoise, ants.get_mask(image))
-    # filt_A = skimage.filters.difference_of_gaussians(A, 1, FFT_max_gaussian)
-    # A_ant = ants.from_numpy(data=filt_A)
-    # denoiseA=ants.denoise_image(A_ant)
-    # Applying multi-Otsu threshold for the default value, generating
-    # three classes.
-    # thresholds = threshold_multiotsu(wave_denoise)
-    # Using the threshold values, we generate the three regions.
-    # regions = np.digitize(wave_denoise, bins=thresholds)
-    # set stuff below mean to zero? --> for some reason this works best
-    # low_values_flags = A < A.mean()
-    # A[low_values_flags] = 0
-    return denoised
-
-def feature_CV2(destination_raw, source_raw, diroverlap, FFT_max_gaussian, high_thres):
+def feature_CV2(destination_raw, source_raw, diroverlap, FFT_max_gaussian, high_thres, localsubjectpath, input_overlap):
     """This finds the overlay given A and B with feature based registration
         Args:
         -	A: 3D set of images to overlap source (moving image)
@@ -293,11 +632,9 @@ def feature_CV2(destination_raw, source_raw, diroverlap, FFT_max_gaussian, high_
     # denoise image
     destination_denoise = denoise(destination_mean, FFT_max_gaussian, high_thres)
     source_denoise = denoise(source_mean, FFT_max_gaussian, high_thres)
-    # limit to only high values
-    source_denoise_std = np.where(source_denoise < source_denoise.std(), 0, source_denoise)
-    destination_denoise_std = np.where(destination_denoise < destination_denoise.std(), 0, destination_denoise)
-    destination = destination_denoise_std
-    source = source_denoise_std
+    # define denoised data
+    destination = destination_denoise
+    source = source_denoise
     # convert to grayscale
     destination = np.interp(destination, (destination.min(), destination.max()), (0, +255))
     source = np.interp(source, (source.min(), source.max()), (0, +255))
@@ -306,14 +643,14 @@ def feature_CV2(destination_raw, source_raw, diroverlap, FFT_max_gaussian, high_
     source = source.astype(np.uint8)
     from PIL import Image
     im_src3d = Image.fromarray(destination)
-    im_src3d.save("src3d_denoise.jpeg")
+    im_src3d.save(localsubjectpath + "src3d_denoise.jpeg")
     im_des3d = Image.fromarray(source)
-    im_des3d.save("des3d_denoise.jpeg")
+    im_des3d.save(localsubjectpath + "des3d_denoise.jpeg")
     # Read reference imagw
-    refFilename = "des3d_denoise.jpeg"
+    refFilename = '{}/{}'.format(localsubjectpath, 'des3d_denoise.jpeg')
     imReference = cv2.imread(refFilename, cv2.IMREAD_GRAYSCALE)
     # Read image to be aligned
-    imFilename = "src3d_denoise.jpeg"
+    imFilename = '{}/{}'.format(localsubjectpath, 'src3d_denoise.jpeg')
     im1 = cv2.imread(imFilename, cv2.IMREAD_GRAYSCALE)
     # preallocate shift
     shift = np.zeros(2)
@@ -340,7 +677,7 @@ def feature_CV2(destination_raw, source_raw, diroverlap, FFT_max_gaussian, high_
     # matches = matches[:numGoodMatches]
     # Draw top matches
     imMatches = cv2.drawMatches(im1, keypoints1, imReference, keypoints2, matches, None)
-    cv2.imwrite("matches.jpg", imMatches)
+    cv2.imwrite(localsubjectpath + "/matches.jpg", imMatches)
     # Extract location of good matches
     points1 = np.zeros((len(matches), 2), dtype=np.float32)
     points2 = np.zeros((len(matches), 2), dtype=np.float32)
@@ -349,22 +686,30 @@ def feature_CV2(destination_raw, source_raw, diroverlap, FFT_max_gaussian, high_
         points2[i, :] = keypoints2[match.trainIdx].pt
     # Find Affine Transformation
     # note swap of order of newpoints here so that image2 is warped to match image1
-    m, inliers = cv2.estimateAffinePartial2D(points1, points2)
-    # Use affine transform to warp im2 to match im1
-    height, width = imReference.shape
-    im1Reg = cv2.warpAffine(im1, m, (width, height))
-    shift[0] = m[1, 2]
-    shift[1] = m[0, 2]
-    error = 0  # todo add this?
-    # abs used below so source or destination order doesnt matter and subject from edge to get overlap value
-    if diroverlap == 'up' or diroverlap == 'down':
-        target_overlap = source_raw.shape[0] - abs(int(round(shift[0])))
-    elif diroverlap == 'left' or diroverlap == 'right':
-        target_overlap = source_raw.shape[1] - abs(int(round(shift[1])))
+    # if not enough points match --> set to input_overlap or warning message to add overlap
+    if points1.shape[0] < 2 or points1.shape[0] < 2:
+        if input_overlap == None:
+            warnings.warn("ERROR: CAN NOT CALCULATE IMAGE OVERLAP PLEASE PROVIDE --input_overlap VALUE")
+        else:
+            warnings.warn("Warning: Can not calculate image overlap, instead using input_overlap value")
+            target_overlap = input_overlap
     else:
-        warnings.warn(
-            "WARNING: diroverlap not defined correctly, Set to down, up, left or right. Currently set to {} ".format(
-                diroverlap))
+        m, inliers = cv2.estimateAffinePartial2D(points1, points2)
+        # Use affine transform to warp im2 to match im1
+        height, width = imReference.shape
+        im1Reg = cv2.warpAffine(im1, m, (width, height))
+        shift[0] = m[1, 2]
+        shift[1] = m[0, 2]
+        error = 0  # todo add this?
+        # abs used below so source or destination order doesnt matter and subject from edge to get overlap value
+        if diroverlap == 'up' or diroverlap == 'down':
+            target_overlap = source_raw.shape[0] - abs(int(round(shift[0])))
+        elif diroverlap == 'left' or diroverlap == 'right':
+            target_overlap = source_raw.shape[1] - abs(int(round(shift[1])))
+        else:
+            warnings.warn(
+                "WARNING: diroverlap not defined correctly, Set to down, up, left or right. Currently set to {} ".format(
+                    diroverlap))
     return target_overlap,
 
 
@@ -388,24 +733,29 @@ def Seg_reg_phase(A, B, FFT_max_gaussian, name, extra_figs, high_thres):
     maskB = ants.get_mask(B_ant)
     """
     # use band pass filtering to remove shaddow
-    filt_A = skimage.filters.difference_of_gaussians(A, 1, FFT_max_gaussian)
+    # filt_A = skimage.filters.difference_of_gaussians(A, 1, FFT_max_gaussian)
     # denoise with wavlet this might not have much of an effect
-    denoise_A = skimage.restoration.denoise_wavelet(filt_A, multichannel=False, rescale_sigma=True)
+    # denoise_A = skimage.restoration.denoise_wavelet(filt_A, multichannel=False, rescale_sigma=True)
     # set stuff below mean to zero?
-    low_values_flags = denoise_A < denoise_A.mean()
-    denoise_A[low_values_flags] = 0
-    high_values_flags = denoise_A > high_thres * denoise_A.mean()
-    denoise_A[high_values_flags] = 0
-    maskA = denoise_A
+    # low_values_flags = denoise_A < denoise_A.mean()
+    # denoise_A[low_values_flags] = 0
+    # high_values_flags = denoise_A > high_thres * denoise_A.mean()
+    # denoise_A[high_values_flags] = 0
+    # maskA = denoise_A
     # use band pass filtering to remove shaddow
-    filt_B = skimage.filters.difference_of_gaussians(B, 1, FFT_max_gaussian)
-    denoise_B = skimage.restoration.denoise_wavelet(filt_B, multichannel=False, rescale_sigma=True)
+    # filt_B = skimage.filters.difference_of_gaussians(B, 1, FFT_max_gaussian)
+    # denoise_B = skimage.restoration.denoise_wavelet(filt_B, multichannel=False, rescale_sigma=True)
     # set stuff below mean to zero?
-    low_values_flags = denoise_B < denoise_B.mean()
-    denoise_B[low_values_flags] = 0
-    high_values_flags = denoise_B > high_thres * denoise_B.mean()
-    denoise_B[high_values_flags] = 0
-    maskB = denoise_B
+    # low_values_flags = denoise_B < denoise_B.mean()
+    # denoise_B[low_values_flags] = 0
+    # high_values_flags = denoise_B > high_thres * denoise_B.mean()
+    # denoise_B[high_values_flags] = 0
+    # maskB = denoise_B
+
+    # denoise data
+    maskA = denoise(A, FFT_max_gaussian, high_thres)
+    maskB = denoise(B, FFT_max_gaussian, high_thres)
+
     # shift denoised data
     shift_reg, error, diffphase = skimage.registration.phase_cross_correlation(maskA, maskB)
     print('Filtered diff phase of {}'.format(diffphase))
@@ -413,16 +763,15 @@ def Seg_reg_phase(A, B, FFT_max_gaussian, name, extra_figs, high_thres):
                                                          translation=(shift_reg[1], shift_reg[0]))
     if extra_figs:
         plt.figure()
-        plt.imshow(maskA)
+        plt.imshow(maskA)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
         plt.savefig(name + 'overlay_mask_A.png', format='png')
         plt.close()
         plt.figure()
-        plt.imshow(maskB)
+        plt.imshow(maskB)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
         plt.savefig(name + 'overlay_mask_B.png', format='png')
         plt.close()
 
     return shift_reg, error, Within_Trans
-
 
 
 def zero_pad(A, B, dim):
@@ -521,7 +870,7 @@ def registration_within(A, B, FFT_max_gaussian, error_overlap, X, Y, Z, i, local
                     X, Y, Z, i, Within_Trans._inv_matrix))
             Within_Trans._inv_matrix = trans_init_array
     del trans_init_array_np, trans_init_array
-    return error, shift_reg, Within_Trans,
+    return error, shift_reg, Within_Trans
 
 
 def registration_X(srcY, desY, X_dir, FFT_max_gaussian, error_overlap, X, Y, Z, blank_thres, localsubjectpath,
@@ -550,13 +899,15 @@ def registration_X(srcY, desY, X_dir, FFT_max_gaussian, error_overlap, X, Y, Z, 
     if input_overlap is None:
         if X == 1 and Y == 0 and Z == 0:  # calculate the initial stitch level ONLY for first overlap
             diroverlap = X_dir  # 'right'
-            [target_overlapX] = feature_CV2(desY, srcY, diroverlap, FFT_max_gaussian, high_thres)
+            [target_overlapX] = feature_CV2(desY, srcY, diroverlap, FFT_max_gaussian, high_thres, localsubjectpath,
+                                            input_overlap)
     else:
         # convert percent in image overlap to number of pixels
         input_overlap = round(srcY.shape[1] * input_overlap)
         if X == 1 and Y == 0 and Z == 0:  # calculate the initial stitch level ONLY for first overlap
             diroverlap = X_dir  # 'right'
-            [target_overlapX] = feature_CV2(desY, srcY, diroverlap, FFT_max_gaussian, high_thres)
+            [target_overlapX] = feature_CV2(desY, srcY, diroverlap, FFT_max_gaussian, high_thres, localsubjectpath,
+                                            input_overlap)
             # make sure user defined input of input_overlap, else just use calculated
             try:
                 input_overlap
@@ -608,13 +959,13 @@ def registration_X(srcY, desY, X_dir, FFT_max_gaussian, error_overlap, X, Y, Z, 
         shift = np.array([0, 0])
         if extra_figs:
             plt.figure()
-            plt.imshow(srcY_Ti_mean_overlap)
+            plt.imshow(srcY_Ti_mean_overlap)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
             plt.savefig(
                 localsubjectpath + 'X=' + str(X) + 'Y=' + str(Y) + 'Z=' + str(Z) + '_source_overlap_X_blank.png',
                 format='png')
             plt.close()
             plt.figure()
-            plt.imshow(desY_mean_overlap)
+            plt.imshow(desY_mean_overlap)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
             plt.savefig(
                 localsubjectpath + 'X=' + str(X) + 'Y=' + str(Y) + 'Z=' + str(Z) + '_destination_overlap_X_blank.png',
                 format='png')
@@ -629,13 +980,13 @@ def registration_X(srcY, desY, X_dir, FFT_max_gaussian, error_overlap, X, Y, Z, 
             shift[1], shift[0]))
         if extra_figs:
             plt.figure()
-            plt.imshow(srcY_Ti_mean_overlap)
+            plt.imshow(srcY_Ti_mean_overlap)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
             plt.savefig(
                 localsubjectpath + 'X=' + str(X) + 'Y=' + str(Y) + 'Z=' + str(Z) + '_source_overlap_X_sparse.png',
                 format='png')
             plt.close()
             plt.figure()
-            plt.imshow(desY_mean_overlap)
+            plt.imshow(desY_mean_overlap)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
             plt.savefig(
                 localsubjectpath + 'X=' + str(X) + 'Y=' + str(Y) + 'Z=' + str(Z) + '_destination_overlap_X_sparse.png',
                 format='png')
@@ -683,7 +1034,8 @@ def registration_Y(srcZ, desZ, Y_dir, FFT_max_gaussian, error_overlap, X, Y, Z, 
                 diroverlap = 'down'
             elif Y_dir == 'bottom':
                 diroverlap = 'up'
-            [target_overlapY] = feature_CV2(desZ, srcZ, diroverlap, FFT_max_gaussian, high_thres)
+            [target_overlapY] = feature_CV2(desZ, srcZ, diroverlap, FFT_max_gaussian, high_thres, localsubjectpath,
+                                            input_overlap)
     else:
         # convert percent in image overlap to number of pixels
         input_overlap = round(srcZ.shape[0] * input_overlap)
@@ -695,7 +1047,8 @@ def registration_Y(srcZ, desZ, Y_dir, FFT_max_gaussian, error_overlap, X, Y, Z, 
                 diroverlap = 'down'
             elif Y_dir == 'bottom':
                 diroverlap = 'up'
-            [target_overlapY] = feature_CV2(desZ, srcZ, diroverlap, FFT_max_gaussian, high_thres)
+            [target_overlapY] = feature_CV2(desZ, srcZ, diroverlap, FFT_max_gaussian, high_thres, localsubjectpath,
+                                            input_overlap)
             # print warning if user defined overlap and calculated overlap different
             if target_overlapY in range(round((input_overlap - (input_overlap * error_overlap))),
                                         round((input_overlap + (input_overlap * error_overlap)))):
@@ -738,11 +1091,11 @@ def registration_Y(srcZ, desZ, Y_dir, FFT_max_gaussian, error_overlap, X, Y, Z, 
         shift = np.array([0, 0])
         if extra_figs:
             plt.figure()
-            plt.imshow(srcZ_Ti_mean_overlap)
+            plt.imshow(srcZ_Ti_mean_overlap)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
             plt.savefig(localsubjectpath + 'Y=' + str(Y) + 'Z=' + str(Z) + '_source_overlap_Y_blank.png', format='png')
             plt.close()
             plt.figure()
-            plt.imshow(desZ_mean_overlap)
+            plt.imshow(desZ_mean_overlap)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
             plt.savefig(localsubjectpath + 'Y=' + str(Y) + 'Z=' + str(Z) + '_destination_overlap_Y_blank.png',
                         format='png')
             plt.close()
@@ -753,11 +1106,11 @@ def registration_Y(srcZ, desZ, Y_dir, FFT_max_gaussian, error_overlap, X, Y, Z, 
             shift[0], shift[1]))
         if extra_figs:
             plt.figure()
-            plt.imshow(srcZ_Ti_mean_overlap)
+            plt.imshow(srcZ_Ti_mean_overlap)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
             plt.savefig(localsubjectpath + 'Y=' + str(Y) + 'Z=' + str(Z) + '_source_overlap_Y_sparse.png', format='png')
             plt.close()
             plt.figure()
-            plt.imshow(desZ_mean_overlap)
+            plt.imshow(desZ_mean_overlap)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
             plt.savefig(localsubjectpath + 'Y=' + str(Y) + 'Z=' + str(Z) + '_destination_overlap_Y_sparse.png',
                         format='png')
             plt.close()
@@ -775,6 +1128,17 @@ def registration_Y(srcZ, desZ, Y_dir, FFT_max_gaussian, error_overlap, X, Y, Z, 
             shift = np.array([0, 0])
     del desZ_mean_overlap, srcZ_Ti_mean_overlap, SKI_Trans, srcZ_Ti
     return error, shift, target_overlapY
+
+
+# In case of boolaen segmentation, the dice loss is equal to 2 x dot product of the flattened arrays,
+# divided by the total volume of both masks.
+def dice_loss(y_true, y_pred):
+    y_true = y_true.flatten()
+    y_pred = y_pred.flatten()
+    intersection = y_true.dot(y_pred)
+    union = sum(y_true) + sum(y_pred)
+    dice = 2 * intersection / union
+    return dice
 
 
 def rmsdiff(source, source_transformed, destination):
@@ -822,11 +1186,269 @@ def rmsdiff(source, source_transformed, destination):
 # TRY 180 degrees:
 # des3d_denoise_rotated = skimage.transform.rotate(des3d_denoise, 5)
 
+# TODO make the function below:
+
+def ridgid_registration(destination_denoise, destination_feature, source_denoise, source_feature):
+    """
+    #http://elastix.bigr.nl/wiki/index.php/Par0013
+
+    Documentation of elastix at: https://elastix.lumc.nl/doxygen/index.html
+
+    destination_denoise=np.load('/Volumes/Backup5TB/2d_3D_linear_reg/des3d_denoise.npy')
+    source_denoise=np.load('/Volumes/Backup5TB/2d_3D_linear_reg/src3d_denoise.npy')
+    destination_feature=np.load('/Volumes/Backup5TB/2d_3D_linear_reg/des3d_feature.npy')
+    source_feature=np.load('/Volumes/Backup5TB/2d_3D_linear_reg/src3d_feature.npy')
+    """
+
+    source_denoise = skimage.transform.rotate(source_denoise, 25)
+    destination_feature = skimage.transform.rotate(destination_feature, 25)
+
+    Trans_test = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=0, translation=(357, 198))
+    # apply to image in src3d feature map
+    destination_feature_trans = skimage.transform.warp(destination_feature, Trans_test._inv_matrix, order=0,
+                                                       mode='edge', preserve_range=True)
+    destination_feature_rot_trans = skimage.transform.rotate(destination_feature_trans, 180)
+
+    # convert data to work with elastix software package
+    destination_denoise = destination_denoise.astype(np.float32)
+    source_denoise = source_denoise.astype(np.float32)
+    fixed_image_denoise = itk.image_from_array(destination_denoise)
+    moving_image_denoise = itk.image_from_array(source_denoise)
+    destination_feature = destination_feature.astype(np.float32)
+    source_feature = source_feature.astype(np.float32)
+    fixed_image_feature = itk.image_from_array(destination_feature)
+    moving_image_feature = itk.image_from_array(source_feature)
+
+    # Import and adjust Parameter Map
+    parameter_object = itk.ParameterObject.New()
+    default_rigid_parameter_map = parameter_object.GetDefaultParameterMap('rigid')
+    parameter_object.AddParameterMap(default_rigid_parameter_map)
+    parameter_object.SetParameter("NumberOfResolutions", "4")
+    # parameter_object.SetParameter("Transform", "EulerTransform")  # this is rigid
+    parameter_object.SetParameter("Transform", "TranslationTransform")  # this is rigid
+
+    # parameter_object.SetParameter("Optimizer", "Simplex")
+    # parameter_object.SetParameter("FixedInternalImagePixelType", "float")
+    # parameter_object.SetParameter("MovingInternalImagePixelType", "float")
+    # parameter_object.SetParameter("Registration", "MultiResolutionRegistration")
+    # parameter_object.SetParameter("Metric", "PatternIntensity")
+    # parameter_object.SetParameter("WriteResultImage", "true")
+    # parameter_object.SetParameter("WriteTransformParametersEachIteration", "true")
+    # parameter_object.SetParameter("ResultImagePixelType", "float")
+    parameter_object.SetParameter("FinalBSplineInterpolationOrder", "0")
+
+    # Import and adjust Parameter Map
+    parameter_object = itk.ParameterObject.New()
+    default_rigid_parameter_map = parameter_object.GetDefaultParameterMap('rigid')
+    parameter_object.AddParameterMap(default_rigid_parameter_map)
+    parameter_object.SetParameter("Transform", "EulerTransform")  # this is rigid
+    # parameter_object.SetParameter("Optimizer", "AdaptiveStochasticGradientDescent")
+    parameter_object.SetParameter("Optimizer", "StandardGradientDescent")  # this allows me to pick step size
+    parameter_object.SetParameter("Registration", "MultiResolutionRegistration")
+    parameter_object.SetParameter("Metric", "AdvancedNormalizedCorrelation")
+    # parameter_object.SetParameter("WriteTransformParametersEachIteration", "true")
+    # parameter_object.SetParameter("ResultImagePixelType", "float")
+    # parameter_object.SetParameter("FinalBSplineInterpolationOrder", "0")
+    parameter_object.SetParameter("NewSamplesEveryIteration", "true")
+    parameter_object.SetParameter("MaximumNumberOfIterations", "5000")
+    # parameter_object.SetParameter("AutomaticScalesEstimation", "true") we want to set rotation and tranlation to both be large values
+    # parameter_object.SetParameter("AutomaticTransformInitialization", "true")
+    # parameter_object.SetParameter("ImageSampler", "RandomCoordinate")
+    # parameter_object.SetParameter("FixedImageBSplineInterpolationOrder", "3")
+    # parameter_object.SetParameter("UseRandomSampleRegion", "true")
+    parameter_object.SetParameter("DefaultPixelValue", "0")  # this is b/c background is 0
+    parameter_object.SetParameter("WriteResultImage", "true")
+    # parameter_object.SetParameter("RequiredRatioOfValidSamples", "0.0001")
+    # parameter_object.SetParameter("NumberOfHistogramBins", "32")
+    parameter_object.SetParameter("UseDirectionCosines", "false")
+    parameter_object.SetParameter("FixedInternalImagePixelType", "float")
+    parameter_object.SetParameter("MovingInternalImagePixelType", "float")
+    parameter_object.SetParameter("FixedImageDimension", "2")
+    parameter_object.SetParameter("MovingImageDimension", "2")
+    parameter_object.SetParameter("FixedImagePyramid", "FixedRecursiveImagePyramid")  # smooth and downsample
+    parameter_object.SetParameter("MovingImagePyramid", "MovingRecursiveImagePyramid")  # smooth and downsample
+    parameter_object.SetParameter("NumberOfResolutions",
+                                  "8")  # 1 resoultion b/c small deformaitons --> NOT sure... LARGE shifts
+
+    # parameter_object.SetParameter("AutomaticTransformInitialization", "true")
+    # parameter_object.SetParameter("AutomaticTransformInitializationMethod", "CenterOfGravity")
+    # parameter_object.SetParameter("ASGDParameterEstimationMethod", "DisplacementDistribution")
+    parameter_object.SetParameter("Scales",
+                                  "1.0")  # we want larGE rotation range 1.0 is the same step  in translation as rotation
+    # parameter_object.SetParameter("SP_alpha", "0.6")
+    # parameter_object.SetParameter("SP_A", "50000")
+    parameter_object.SetParameter("SP_a", "10000")  # this is for large steps
+    parameter_object.SetParameter("NumberOfSpatialSamples", "5000")
+
+    parameter_object.SetParameter("SubtractMean", "false")
+
+    # todo note: this works for trnaslation... the issue is ROTATION .....doenst work on only rot or rot + trans
+
+    result_image, result_transform_parameters = itk.elastix_registration_method(
+        fixed_image=fixed_image_feature_rot_trans, moving_image=fixed_image_feature,
+        parameter_object=parameter_object,
+        log_to_console=True, output_directory='/Users/kaleb/Documents/CSHL/2d_3D_linear_reg/')
+
+    euler_transform = itk.Euler2DTransform[itk.D].New()
+
+    pm0 = result_transform_parameters.GetParameterMap(0)
+
+    center = [float(p) for p in pm0['CenterOfRotationPoint']]  # todo take this as center of rotatiion
+    fixed_parameters = itk.OptimizerParameters[itk.D](len(center))
+    for i, p in enumerate(center):
+        fixed_parameters[i] = p
+    euler_transform.SetFixedParameters(fixed_parameters)
+
+    elx_parameters = [float(p) for p in pm0['TransformParameters']]  # todo take this as
+    itk_parameters = itk.OptimizerParameters[itk.D](len(elx_parameters))
+    for i, p in enumerate(elx_parameters):
+        itk_parameters[i] = p
+    euler_transform.SetParameters(itk_parameters)
+
+    dimension = moving_image_denoise.GetImageDimension()
+
+    # When creating the composite transform for itk,
+    # take into account that elastix uses T2(T1(x)) while itk does this the other way around.
+    # So to get the correct composite transform, add the last transform in elastix first in itk.
+    composite_transform = itk.CompositeTransform[itk.D, dimension].New()
+    composite_transform.AddTransform(euler_transform)
+
+    # todo chnage for both input of feautre and denoise for feature binary image use:AdvancedKappaStatistic
+
+    # set parameters by: http://elastix.bigr.nl/wiki/index.php/Par0013
+
+    # define noise parameter map
+    parameter_object_denoise = itk.ParameterObject.New()
+    resolutions = 1
+    parameter_map_rigid = parameter_object_denoise.GetDefaultParameterMap('rigid', resolutions)
+    parameter_object_denoise.AddParameterMap(parameter_map_rigid)
+    parameter_object_denoise.SetParameter("Transform", "EulerTransform")  # this is rigid
+    parameter_object_denoise.SetParameter("Optimizer", "AdaptiveStochasticGradientDescent")
+    parameter_object_denoise.SetParameter("FixedInternalImagePixelType", "float")
+    parameter_object_denoise.SetParameter("MovingInternalImagePixelType", "float")
+    parameter_object_denoise.SetParameter("Resampler", "Full")  # set image sampler to full --> so no downsampling
+    parameter_object_denoise.SetParameter("Registration", "MultiMetricMultiResolutionRegistration")
+    parameter_object_denoise.SetParameter("FixedImagePyramid", "FixedSmoothingImagePyramid")
+    parameter_object_denoise.SetParameter("MovingImagePyramid", "MovingSmoothingImagePyramid")
+    parameter_object_denoise.SetParameter("Metric", "AdvancedNormalizedCorrelation")
+    parameter_object_denoise.SetParameter("NumberOfResolutions", "1")
+
+    parameter_object_denoise.SetParameter("UseDirectionCosines", "False")
+    parameter_object_denoise.SetParameter("AutomaticTransformInitialization", "True")
+    parameter_object_denoise.SetParameter("AutomaticTransformInitializationMethod", "GeometricalCenter")
+    parameter_object_denoise.SetParameter("UseComplement", "False")
+
+    parameter_object_denoise.SetParameter("MaximumNumberOfSamplingAttempts", "1")
+
+    # Load Elastix Image Filter Object
+    elastix_object = itk.ElastixRegistrationMethod.New(fixed_image_denoise, moving_image_denoise,
+                                                       parameter_object=parameter_object_denoise)  # ,out='/Users/kaleb/Documents/CSHL/2d_3D_linear_reg/')
+    # elastix_object.SetFixedImage(fixed_image_spectrum1)
+    elastix_object.AddFixedImage(fixed_image_feature)
+    # elastix_object.SetMovingImage(moving_image_spectrum1)
+    elastix_object.AddMovingImage(moving_image_feature)
+    # define feaure parameter map
+    parameter_object_feature = itk.ParameterObject.New()
+    resolutions = 1
+    parameter_map_rigid = parameter_object_feature.GetDefaultParameterMap('rigid', resolutions)
+    parameter_object_feature.AddParameterMap(parameter_map_rigid)
+    parameter_object_feature.SetParameter("Metric", "AdvancedKappaStatistic")
+    parameter_object_denoise.SetParameter("Transform", "EulerTransform")  # this is rigid
+    parameter_object_denoise.SetParameter("Optimizer", "AdaptiveStochasticGradientDescent")
+    parameter_object_denoise.SetParameter("FixedInternalImagePixelType", "float")
+    parameter_object_denoise.SetParameter("MovingInternalImagePixelType", "float")
+    parameter_object_denoise.SetParameter("Resampler", "Full")  # set image sampler to full --> so no downsampling
+    parameter_object_denoise.SetParameter("Registration", "MultiMetricMultiResolutionRegistration")
+    parameter_object_denoise.SetParameter("FixedImagePyramid", "FixedSmoothingImagePyramid")
+    parameter_object_denoise.SetParameter("MovingImagePyramid", "MovingSmoothingImagePyramid")
+    parameter_object_feature.SetParameter("out", "/Users/kaleb/Documents/CSHL/2d_3D_linear_reg/")
+    parameter_object_feature.SetParameter("NumberOfResolutions", "1")
+    # prefom registration
+    elastix_object.SetParameterObject(parameter_object_feature)
+    # Set additional options
+    elastix_object.SetLogToConsole(True)
+    # Update filter object (required)
+    elastix_object.UpdateLargestPossibleRegion()
+    # Results of Registration
+    result_image = elastix_object.GetOutput()
+    result_transform_parameters = elastix_object.GetTransformParameterObject()
+
+    # covert result_image to array
+    itk.transformread(result_transform_parameters)
+
+    t_params = np.asarray(result_transform_parameters["TransformParameters"]).astype(np.float)
+
+    # get values from transformation matrix
+    # new_angle_rad = result_transform_parameters(????)
+    # shift = result_transform_parameters(????)
+
+    return new_angle_rad, shift
+
+
 def phase_corr_rotation(destination, source, degree_thres):
+    """
+    #http://elastix.bigr.nl/wiki/index.php/Par0013
+
+    #maybe use RIDGID registration instead of angle:
+    import itk
+
+
+    des3d_features32=des3d_denoise.astype(np.float32)
+    des3d_features_rotated32=src3d_denoise.astype(np.float32)
+    fixed_image= itk.image_from_array(des3d_features32)
+    moving_image = itk.image_from_array(des3d_features_rotated32)
+    # Import Default Parameter Map
+    parameter_object = itk.ParameterObject.New()
+    default_rigid_parameter_map = parameter_object.GetDefaultParameterMap('rigid')
+    parameter_object.AddParameterMap(default_rigid_parameter_map)
+
+    #use multi image? multi-image In this case the registration cost function is defined as:
+#use BOTH segmentation AND ddenoise images to register slice for segmentation use kappa statistic for denoise use... https://github.com/InsightSoftwareConsortium/ITKElastix/blob/master/examples/ITK_Example02_CustomOrMultipleParameterMaps.ipynb
+
+#or use groupwise?
+https://github.com/InsightSoftwareConsortium/ITKElastix/blob/master/examples/ITK_Example06_GroupwiseRegistration.ipynb
+
+#or input ALL 3D data???
+
+#see: https://github.com/InsightSoftwareConsortium/ITKElastix
+
+#can use this to transform data: esult_image_transformix = itk.transformix_filter(moving_image,result_transform_parameters)
+
+
+    #NumberOfResolutions to 1
+
+    #make sure Optimizer "AdaptiveStochasticGradientDescent" is set to SPA is found from data
+
+    #set ouput path
+
+    #is setting UseDirectionCosines to true correct?
+
+    #set this to true? ShowExactMetricValue
+
+    #reduce this to less then 8: MaximumNumberOfSamplingAttempts
+
+    #set metrix to AdvancedNormalizedCorrelation
+
+    # Call registration function
+    result_image, result_transform_parameters = itk.elastix_registration_method(fixed_image, moving_image,parameter_object=parameter_object,log_to_console=True)
+    # Plot images
+    fig, axs = plt.subplots(1,3, sharey=True, figsize=[30,30])
+    plt.figsize=[100,100]
+    axs[0].imshow(result_image)
+    axs[0].set_title('Result', fontsize=30)
+    axs[1].imshow(fixed_image)
+    axs[1].set_title('Fixed', fontsize=30)
+    axs[2].imshow(moving_image)
+    axs[2].set_title('Moving', fontsize=30)
+    plt.show()
+    """
+    # for testing: des3d_features_rotated = skimage.transform.rotate(des3d_features, 150)
+    # for testing: des3d_denoise_rotated = skimage.transform.rotate(des3d_denoise, 150)
     myconstraints = {
         "scale": [1, 0]  # this is a scale of 1 without and stardev
     }
-    result = ird.imreg.similarity(destination, source, constraints=myconstraints)
+    result = ird.imreg.similarity(destination, source,
+                                  constraints=myconstraints)  # todo fix this? error from this line: numpy.core._exceptions.MemoryError: Unable to allocate 1.23 GiB for an array with shape (9074, 9066) and data type complex128
     theta = abs(result["angle"])
     lst = [0, 180]  # this is list of angles to return closest one to measured valve
     idx = (np.abs(lst - theta)).argmin()
@@ -837,17 +1459,81 @@ def phase_corr_rotation(destination, source, degree_thres):
     if np.abs((new_angle_180_0 - theta)) > degree_thres:
         new_angle = new_angle_180_0
         warnings.warn(
-            message="WARNING: degree shift larger then {} from {}, angle of {} detected. Setting angle to {}".format(
+            message="WARNING: Z rotation degree shift larger then {} from {}, angle of {} detected. Setting angle to {}".format(
                 degree_thres, new_angle_180_0, np.abs((new_angle_180_0 - theta)), new_angle_180_0))
     else:
         new_angle = theta
+    print('Z Theta is {}'.format(new_angle))
     # convert angle to radians
     new_angle_rad = math.radians(new_angle)
     return new_angle_rad
 
 
-def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_feature, count_shiftZ, shiftZ, angleZ,
+"""
+def remodeling_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_feature, count_shiftZ, shiftZ, angleZ,
                    apply_transform, rigid_2d3d, error_overlap, find_rot, degree_thres, denoise_all, max_Z_proj_affine, seq_dir):
+                   
+    #https://github.com/marsmarcin/Generate-3D-models-from-2D-images
+      
+    #https://github.com/search?q=itk+2d+3d+registration&type=repositories               
+                   
+                   
+    #https://github.com/InsightSoftwareConsortium/ITKTwoProjectionRegistration            
+                   
+                   
+    #ML based? https://github.com/hzxie/Pix2Vox
+
+    #https://github.com/gift-surg/NiftyMIC
+
+    #https://github.com/elhuhdron/emdrp
+
+    #https://pypi.org/project/neutompy/ this uses : https://www.astra-toolbox.com/docs/algs/BP.html
+
+    #https://itk.org/ITKExamples/src/IO/ImageBase/Creade3DFromSeriesOf2D/Documentation.html
+
+    This registers 2D to 3D along Z axis
+        Args:
+        -	rc3d_feature, des3d_feature: the source and destination feature map, used to register rigid
+        -   src3d_denoise, des3d_denoise: the source and destination deionised data, used to affine
+        -   count_shiftZ: the number of countZ to load from saved array if needed
+        -   shiftZ: saved shifitZ data
+        -   apply_transform: True if run saved transformations, false otherwise
+        -   rigid_2d3d: True if run rigid registration, false otherwise
+
+        Returns:
+        -	src3d_T_feature: source feature file shifted with registration values
+        -   des3d_feature : destination feature file
+        -   ount_shiftZ, shiftZ:  registration shift
+        -   src3d_T: source raw file shifted with registration values
+
+
+    https://github.com/InsightSoftwareConsortium/ITKElastix/blob/master/examples/ITK_Example05_PointRegistration.ipynb
+    
+    #maybe take segmentation --> find centroids --> then apply this  to it?  
+    
+    
+
+    #use:  Contour propagation
+
+    #maybe https://github.com/opencv/opencv_contrib/tree/master/modules/sfm
+    
+    #note for this segment is refeering to a 2D slice
+    #https://www.slicer.org/
+    #https://github.com/SlicerRt/SegmentRegistration#segment-registration
+    
+    
+    #https://github.com/SlicerRt/SegmentRegistration#segment-registration
+
+
+
+    return src3d_T, src3d_T_feature, src3d_T_denoise, count_shiftZ, shiftZ, error_allZ
+
+"""
+
+
+def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_feature, count_shiftZ, shiftZ, angleZ,
+                   apply_transform, rigid_2d3d, error_overlap, find_rot, degree_thres, denoise_all, max_Z_proj_affine,
+                   seq_dir, maxZshift_percent):
     """
     This registers 2D to 3D along Z axis
         Args:
@@ -865,7 +1551,9 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
         -   src3d_T: source raw file shifted with registration values
 
     """
-    #nice ppt on optial flow" https://github.com/aplyer/gefolki/blob/master/COREGISTRATION.pdf
+    # nice ppt on optial flow" https://github.com/aplyer/gefolki/blob/master/COREGISTRATION.pdf
+    Z_max_shift0 = src3d.shape[0] * (maxZshift_percent / 100)
+    Z_max_shift1 = src3d.shape[1] * (maxZshift_percent / 100)
     if denoise_all:
         if max_Z_proj_affine:
             src3d_denoise_one = np.max(src3d_denoise, axis=2)
@@ -878,7 +1566,7 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
                 src3d_denoise_one = src3d_denoise[:, :, -1]
                 des3d_denoise_one = des3d_denoise[:, :, 0]
             else:
-                warnings.warn("opticalZ_dir variable not defined correctly")
+                warnings.warn(message="WARNING:opticalZ_dir variable not defined correctly")
     else:
         src3d_denoise_one = src3d_denoise
         des3d_denoise_one = des3d_denoise
@@ -892,12 +1580,20 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
         else:
             # find rotation
             if find_rot:
-                angle_rad = phase_corr_rotation(des3d_denoise_one, src3d_denoise_one, degree_thres)
+                angle_rad = phase_corr_rotation(des3d_denoise_one, src3d_denoise_one,
+                                                degree_thres)  # todo change back to des3d_denoise_one, src3d_denoise_one?
             else:
                 angle_rad = 0.0
             # basic phase corr only
-            shift, error, diffphase = skimage.registration.phase_cross_correlation(des3d_feature,
-                                                                                   src3d_feature)  # feature and denosie give similar values
+            shift, error, diffphase = skimage.registration.phase_cross_correlation(des3d_denoise_one,
+                                                                                   src3d_denoise_one)  # feature and denosie give similar values
+            if shift[0] > Z_max_shift1 or shift[1] > Z_max_shift0:
+                warnings.warn(
+                    message="WARNING: Z shift exceeded limits, shift X = {} shift y = {}. Seeting Z translation to zero.".format(
+                        shift[1], shift[0]))
+                shift[0] = 0
+                shift[1] = 0
+            print('Z Phase translation is {}'.format(shift))
             shiftZ.append(shift)
             angleZ.append(angle_rad)
         error_allZ.append(error)
@@ -920,7 +1616,8 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
         src3d_T = np.transpose(src3d_T, axes=[1, 2, 0])
         # loop comprehension to apply to all images in src3d_denoise
         if denoise_all:
-            src3d_T_denoise = [skimage.transform.warp(src3d_denoise[:, :, i], SKI_Trans_all_Z._inv_matrix, mode='edge') for i in range(src3d_denoise.shape[2])]
+            src3d_T_denoise = [skimage.transform.warp(src3d_denoise[:, :, i], SKI_Trans_all_Z._inv_matrix, mode='edge')
+                               for i in range(src3d_denoise.shape[2])]
             if np.max(src3d_T_denoise) < 1:  # only if max less then one convert to unit
                 src3d_T_denoise = skimage.img_as_uint(src3d_denoise, force_copy=False)
             else:
@@ -942,16 +1639,28 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
         else:
             # find rotation
             if find_rot:
-                angle_rad = phase_corr_rotation(des3d_denoise_one, src3d_denoise_one, degree_thres)
+                angle_rad = phase_corr_rotation(des3d_denoise_one, src3d_denoise_one,
+                                                degree_thres)  # todo change back to des3d_denoise_one, src3d_denoise_one?
             else:
                 angle_rad = 0.0
-            rotation_trans = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=angle_rad, translation=(0, 0))
+            rotation_trans = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=angle_rad,
+                                                                   translation=(0, 0))
             # phase correlation here --> then motion based
-            shift, error, diffphase = skimage.registration.phase_cross_correlation(des3d_feature, src3d_feature)  # feature and denosie give similar values
+            shift, error, diffphase = skimage.registration.phase_cross_correlation(des3d_denoise_one,
+                                                                                   src3d_denoise_one)  # feature and denosie give similar values
+            if shift[0] > Z_max_shift1 or shift[1] > Z_max_shift0:
+                warnings.warn(
+                    message="WARNING: Z shift exceeded limits, shift X = {} shift y = {}. Seeting Z translation to zero.".format(
+                        shift[1], shift[0]))
+                shift[0] = 0
+                shift[1] = 0
+            print('Z Phase translation is {}'.format(shift))
             # calculate OVERALL SHIFT from inital guess + phase correlations
-            Tran_Z_phase = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=angle_rad, translation=(shift[1], shift[0]))
+            Tran_Z_phase = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=angle_rad,
+                                                                 translation=(shift[1], shift[0]))
             # apply to image in src3d_denoise to use to calculate V and U
-            src3d_denoise_phase_shift = skimage.transform.warp(src3d_denoise_one, Tran_Z_phase._inv_matrix, order=0, mode='edge', preserve_range=True)
+            src3d_denoise_phase_shift = skimage.transform.warp(src3d_denoise_one, Tran_Z_phase._inv_matrix, order=0,
+                                                               mode='edge', preserve_range=True)
             src3d_denoise_phase_shift = src3d_denoise_phase_shift.astype(src3d_denoise_one.dtype)
             v, u = skimage.registration.optical_flow_tvl1(des3d_denoise_one, src3d_denoise_phase_shift)
             # add phase and motion correction together
@@ -991,20 +1700,26 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
         src3d_T = np.transpose(src3d_T, axes=[1, 2, 0])
         # apply to denoise
         if denoise_all:
-            src3d_T_denoise_rot = [skimage.transform.warp(src3d_denoise[:, :, i], rotation_trans._inv_matrix,order=0, mode='edge', preserve_range=True) for i in range(src3d_denoise.shape[2])]
+            src3d_T_denoise_rot = [
+                skimage.transform.warp(src3d_denoise[:, :, i], rotation_trans._inv_matrix, order=0, mode='edge',
+                                       preserve_range=True) for i in range(src3d_denoise.shape[2])]
             if np.max(src3d_T_denoise_rot) < 1:  # only if max less then one convert to unit
                 src3d_T_denoise_rot = skimage.img_as_uint(src3d_denoise, force_copy=False)
             else:
                 src3d_T_denoise_rot = np.array(src3d_T_denoise_rot, dtype=src3d_denoise.dtype)
             src3d_T_denoise_rot = np.transpose(src3d_T_denoise_rot, axes=[1, 2, 0])
-            src3d_T_denoise = [skimage.transform.warp(src3d_T_denoise_rot, np.array([row_coords + v_shift, col_coords + u_shift]), order=0, mode='nearest', preserve_range=True) for i in range(src3d_denoise.shape[2])]
+            src3d_T_denoise = [
+                skimage.transform.warp(src3d_T_denoise_rot, np.array([row_coords + v_shift, col_coords + u_shift]),
+                                       order=0, mode='nearest', preserve_range=True) for i in
+                range(src3d_denoise.shape[2])]
             if np.max(src3d_T_denoise) < 1:  # only if max less then one convert to unit
                 src3d_T_denoise = skimage.img_as_uint(src3d_denoise, force_copy=False)
             else:
                 src3d_T_denoise = np.array(src3d_T_denoise, dtype=src3d_denoise.dtype)
             src3d_T_denoise = np.transpose(src3d_T_denoise, axes=[1, 2, 0])
         else:
-            src3d_T_denoise_rot = skimage.transform.warp(src3d_denoise, rotation_trans._inv_matrix, order=0, mode='edge',
+            src3d_T_denoise_rot = skimage.transform.warp(src3d_denoise, rotation_trans._inv_matrix, order=0,
+                                                         mode='edge',
                                                          preserve_range=True)
             src3d_T_denoise_rot = src3d_T_denoise_rot.astype(src3d_denoise.dtype)
             src3d_T_denoise = skimage.transform.warp(src3d_T_denoise_rot,
@@ -1012,10 +1727,136 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
                                                      mode='nearest', preserve_range=True)
             # this chnage back to unit 8 dtype from float 64, this and preserve range are needed to keep shift as binary image
             src3d_T_denoise = src3d_T_denoise.astype(src3d_denoise.dtype)
+
     return src3d_T, src3d_T_feature, src3d_T_denoise, count_shiftZ, shiftZ, error_allZ
 
 
 """
+
+    #run rolling ball to remove uneven background intensity #https://scikit-image.org/docs/dev/auto_examples/segmentation/plot_rolling_ball.html#sphx-glr-auto-examples-segmentation-plot-rolling-ball-py
+    #convert image to float for calculations below?
+    denoised1 = skimage.util.img_as_float(denoised1)
+    # calibrate rolling_ball
+    if denoised1.ndim == 3:
+        parameter_ranges_rolling_ball = {
+            'kernel': [restoration.ellipsoid_kernel((3, 3, 1), 0.1), restoration.ellipsoid_kernel((5, 5, 1), 0.1),
+                       restoration.ellipsoid_kernel((11, 11, 1), 0.1), restoration.ellipsoid_kernel((21, 21, 1), 0.1),
+                       restoration.ellipsoid_kernel((301, 301, 1), 0.1)]}
+    elif denoised1.ndim == 2:
+        parameter_ranges_rolling_ball = {
+            'kernel': [restoration.ellipsoid_kernel((3, 3), 0.1), restoration.ellipsoid_kernel((5, 5), 0.1),
+                       restoration.ellipsoid_kernel((11, 11), 0.1), restoration.ellipsoid_kernel((21, 21), 0.1),
+                       restoration.ellipsoid_kernel((301, 301), 0.1)]}
+    _, (parameters_tested_rolling_ball, losses_rolling_ball) = calibrate_denoiser(denoised1, restoration.rolling_ball, parameter_ranges_rolling_ball, extra_output=True)
+    best_parameters_rolling_ball = parameters_tested_rolling_ball[np.argmin(losses_rolling_ball)]
+    background = _invariant_denoise(denoised1, restoration.rolling_ball, denoiser_kwargs=best_parameters_rolling_ball)
+    denoised = denoised1 - background
+
+
+
+
+        # if blank then run gaussian #todo check if we still have blank images not being low pass filtered???
+    #    if A.max() < blank_thres * A.mean():
+    #    denoised = skimage.filters.difference_of_gaussians(denoised1, 1, FFT_max_gaussian)
+    # else:
+    #    denoised = denoised1
+    # run gussian after above that way of can be taken care above it will be
+    # run difference_of_gaussians and find optimal value to get ride of low freq signal
+    # parameter_ranges_gaussians = {'low_sigma': np.arange(1, 2, 1), 'high_sigma': np.arange(1, 10, 0.5)} #this gives option  of no difference of gausian b/c high and low sigma could both be 1
+    # _, (parameters_tested_gaussians, losses_gaussians) = calibrate_denoiser(denoised1, skimage.filters.difference_of_gaussians, denoise_parameters=parameter_ranges_gaussians, extra_output=True)
+    # best_parameters_gaussians = parameters_tested_gaussians[np.argmin(losses_gaussians)]
+    # denoised = _invariant_denoise(denoised1, skimage.filters.difference_of_gaussians, denoiser_kwargs=best_parameters_gaussians)
+    # todo ONLY RUN ABOVE IF losses_gaussians is less then denoised1 file
+    
+def denoise_old(A, FFT_max_gaussian, high_thres):
+    This denoise data with difference of gausian , wavlet, non-local means and TV norm
+        Args:
+        -	A Numpy array to be denoised
+        - high_thres: this is the threshold to very high values
+        -FFT_max_gaussian: this if high sigma for difference of gausian
+        Returns:
+        -	denoised: denoised image
+
+    # todo try and autoencoder here instead? https://www.pyimagesearch.com/2020/02/24/denoising-autoencoders-with-keras-tensorflow-and-deep-learning/
+    # first make autoendoer with MNIST and add noise --> then apply this encoder to this dataset: https://towardsdatascience.com/image-noise-reduction-in-10-minutes-with-convolutional-autoencoders-d16219d2956a
+
+    sigma_est_ori = np.mean(skimage.restoration.estimate_sigma(A, multichannel=False))
+    print(f"estimated noise standard deviation = {sigma_est_ori}")
+
+    # todo optimize denoise? --> basically try range of options?
+    #todo add optimizer option in code??
+    # if what value sigma_est_ori do we skip denoise? https://scikit-image.org/docs/dev/auto_examples/filters/plot_j_invariant_tutorial.html#sphx-glr-auto-examples-filters-plot-j-invariant-tutorial-py
+
+    #todo this to find BEST denoising algorithum with BEST parameters
+
+    #see: https://scikit-image.org/docs/dev/auto_examples/filters/plot_j_invariant_tutorial.html#sphx-glr-auto-examples-filters-plot-j-invariant-tutorial-py
+    #Comparing Different Classes of Denoiser
+
+    # remove extremely high values --> remove hair
+    if (A > (high_thres * A.mean())).any():
+        warnings.warn(message='High intensity Image detected')
+        high_thres_dec = high_thres / 100
+        # remove whole connected image to this
+        int_thres = (high_thres * A.mean())
+        area_thres = A.shape[1] * high_thres_dec
+        A = remove_large_obj(A, area_thres, int_thres, FFT_max_gaussian, high_thres_dec)
+
+    # use band pass filtering to remove shadow
+    filt_A = skimage.filters.difference_of_gaussians(A, 1, FFT_max_gaussian)
+    # denoise with wavlet
+    denoise_wave = skimage.restoration.denoise_wavelet(filt_A, sigma=None, wavelet='haar', mode='soft',
+                                                       wavelet_levels=None, multichannel=False, convert2ycbcr=False,
+                                                       method='BayesShrink', rescale_sigma=True)
+    # Non - localmeans
+    sigma_est = np.mean(skimage.restoration.estimate_sigma(denoise_wave, multichannel=False))
+    patch_kw = dict(patch_size=5,  # 5x5 patches
+                    patch_distance=6,  # 13x13 search area
+                    multichannel=False)
+    # this is used for salt and peper
+    denoise_nl_mean = skimage.restoration.denoise_nl_means(denoise_wave, h=1.15 * sigma_est, fast_mode=False,
+                                                           preserve_range=True, **patch_kw)
+
+    #todo run this wihtout TV norm? will this work? are we denoisng too much on some images?
+
+    # TV norm --> is this too MUCH???
+    # this ALSO used for salt and peper
+    denoise = skimage.restoration.denoise_tv_chambolle(denoise_nl_mean, weight=0.1, eps=0.0002, n_iter_max=200,
+                                                       multichannel=False)
+    # differance of gaussian again.. why?
+    filt_B = skimage.filters.difference_of_gaussians(denoise, 1, FFT_max_gaussian)
+    denoised = filt_B
+    # clip negative values? --> this removes to much of images durring denoise
+    # convert to image if need be
+    # if denoised.max() < 1:
+    #    denoised = skimage.img_as_uint(denoised, force_copy=False)
+    return denoised
+
+
+    # this is a way to try a bunch of wavlet denoise options and use best:
+    # https://scikit-image.org/docs/dev/auto_examples/filters/plot_j_invariant_tutorial.html#sphx-glr-auto-examples-filters-plot-j-invariant-tutorial-py
+    # low_values_flags = denoise < denoise.mean()/2
+    # denoise[low_values_flags] = 0
+    # this removes small bright and dark spots
+    # med = skimage.filters.median(denoise, skimage.morphology.disk(7))
+    # filt_B = skimage.filters.difference_of_gaussians(med, 1, FFT_max_gaussian)
+    # skimage.morphology.area_closing(denoise, area_threshold=3, connectivity=1, parent=None, tree_traverser=None)
+    # skimage.morphology.area_opening(image, area_threshold=3, connectivity=1, parent=None, tree_traverser=None)
+    # filt_B = skimage.filters.difference_of_gaussians(denoise, 1, FFT_max_gaussian)
+    # test = denoise - filt_B
+    # segmentation: https://scikit-image.org/docs/0.18.x/auto_examples/segmentation/plot_morphsnakes.html#sphx-glr-auto-examples-segmentation-plot-morphsnakes-py
+    # or try antss denoise: ants.denoise_image
+    # imagedenoise = ants.denoise_image(imagenoise, ants.get_mask(image))
+    # filt_A = skimage.filters.difference_of_gaussians(A, 1, FFT_max_gaussian)
+    # A_ant = ants.from_numpy(data=filt_A)
+    # denoiseA=ants.denoise_image(A_ant)
+    # Applying multi-Otsu threshold for the default value, generating
+    # three classes.
+    # thresholds = threshold_multiotsu(wave_denoise)
+    # Using the threshold values, we generate the three regions.
+    # regions = np.digitize(wave_denoise, bins=thresholds)
+    # set stuff below mean to zero? --> for some reason this works best
+    # low_values_flags = A < A.mean()
+    # A[low_values_flags] = 0
 
 def findoverlay(A, B, diroverlap):
     import skimage

@@ -14,18 +14,21 @@ Output: np array of 3D image, calculated image overlap,  and video(— or some o
 
 """
 
-
 import ants
 import os
 import argparse
 import numpy as np
 
 
+# TODO look into import itk @ https://github.com/InsightSoftwareConsortium/ITKElastix/blob/master/examples/ITK_UnitTestExample1_RigidRegistration.ipynb
+
+
 def parse_args(add_help=True):
     # this adds help to main function
     parser = argparse.ArgumentParser(description='3d to 3D registration', add_help=add_help)
     # these are required inputs arguments
-    parser.add_argument("--remotesubjectpath", required=True, type=str, help="This is full path where to files are located eaither locally or on remote server (ex:'/home/imagestorage/ZadorConfocal1/xiaoyin/20201205JB050tomatolectinlabeling647/lectin_1/'")
+    parser.add_argument("--remotesubjectpath", required=True, type=str,
+                        help="This is full path where to files are located eaither locally or on remote server (ex:'/home/imagestorage/ZadorConfocal1/xiaoyin/20201205JB050tomatolectinlabeling647/lectin_1/'")
 
 
 

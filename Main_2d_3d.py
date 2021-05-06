@@ -61,6 +61,7 @@ import argparse
 import re
 # improt from 2d-3d functions
 import func_2d_3d as func2d3d
+import matplotlib
 
 # reload module
 # import importlib
@@ -90,14 +91,11 @@ def parse_args(add_help=True):
                         help="This is the file name prefex of images to register (ex:'Il-A). Note its assumed optical Z number is after this label in the image name")
     parser.add_argument("--localsubjectpath", required=True, type=str,
                         help="This is full path where to load and save files (ex:'/grid/zador/home/vinehout/code/2d_3D_linear_reg/')")
-
     parser.add_argument("--remotesubjectpath", required=True, type=str, action='append',
                         help="This is full path where to files are located eaither locally or on remote server (ex:'/home/imagestorage/ZadorConfocal1/xiaoyin/20201205JB050tomatolectinlabeling647/lectin_1/'")
-
     # this adds optional input arguments
     parser.add_argument("--input_overlap", default=None, type=float,
                         help="Percent image overlap. 0-1, 0.10 represents 10 percent. (ex:--input_overlap=0.10)")
-
     parser.add_argument("--opticalZ_dir", default='top', choices=['top', 'bottom'],
                         help="this is 'top' if image 1 is above image 0 and 'bottom' if image 1 is below image 0 (default: 'top'")
     parser.add_argument("--X_dir", default='right', choices=['left', 'right'],
@@ -128,32 +126,30 @@ def parse_args(add_help=True):
                         help='Defines the position of the X value in the folder name (EX: in POSZ(Z)_XXX_YYY the value is [-6,-3]) Only numbers are indexed (defualt [-6,-3].')
     parser.add_argument('--POS_folder_Y', nargs=2, type=str, metavar=('Ystart', 'Yend'), default=['-2', 'None'],
                         help='Defines the position of the Y value in the folder name (EX: in POSZ(Z)_XXX_YYY the value is [-2,-1]) Only numbers are indexed (defualt [-2,-1].')
-
     parser.add_argument("--apply_transform", default=False, type=str2bool,
                         help="This is set to true if you want to apply transfomations calculated on a diffferent image channel to the image channel provided here. --saved_transforms_path needs to be defined for this work. (defualt: False)")
     parser.add_argument("--saved_transforms_path", default=None, type=str,
                         help="This is used if --apply_transform is set to true. This is the full path to the folder where registration files from another set of images are saved. This needs to included image type for saved files (ex: Il-A)  ex: '/Users/kaleb/data/2d_3D_linear_reg/registration/Il-A'. (default:none)")
     parser.add_argument("--extra_figs", type=str2bool, default=False,
                         help="This is used to save additional figured useful in troubleshooting, results saved in registration folder. (ex: --saved_transforms_path=True). (Default: Fasle)")
-
-    parser.add_argument("--max_Z_proj_affine", default=False, type=str2bool,
+    parser.add_argument("--max_Z_proj_affine", default=True, type=str2bool,
                         help="This is used to use max Z projections instead of once slice for affine Z slice to Z slice calculateions. Set to true if images are  noisy, or false if low noise levels. (ex:--max_Z_proj_affine=True)(defualt:False)")
-    parser.add_argument("--high_thres", default=10, type=int,
-                        help="This is used to theshold image. Values above high_thres * the mean of the image will be set to zero (ex:--high_thres=10)(default:10)")
+    parser.add_argument("--high_thres", default=5, type=int,
+                        help="This is used to remove image artifacts with high intensiity. This is for images with high_thres > then the mena of the image. (ex:--high_thres=5)(default:5)")
     parser.add_argument("--rigid_2d3d", default=False, type=str2bool,
                         help="This is used to only run rigid registratiion on feature map when combining Z planes, otherwise affine registration with optical flow is preformed.(ex:--rigid_2d3d=False)(default:False)")
     parser.add_argument("--output", default='registration', type=str,
                         help="This is used to define the output folder.(ex:--output='registration')(default:'registration')")
-
     parser.add_argument("--find_rot", default=False, type=str2bool,
                         help="This is set to true to look for 180 degree rotated physical slices.(ex:--find_rot=True)(default:'Fasle')")
-
     parser.add_argument("--degree_thres", default=10, type=int,
                         help="This is used to define the angle error tolerance from Physical Z slice to Physical Z slice registration, this tolerance is added to a search around zero and 180 degrees. Values are in degrees. (ex:--degree_thres=10)(default:10)")
-
     parser.add_argument("--denoise_all", default=True, type=str2bool,
                         help="This is used to output a denoise array that is the same size as the full dataset. If set to false the denoise array is only the images used for registration. (ex:--denoise_all=True)(default:True)")
-
+    parser.add_argument("--maxZshift_percent", default=25, type=int,
+                        help="This is used place limits on the Z plane to Z plane translation. This is the percent of the image allowed for translation, if above this threhold set to 0 translation. The default is 25% of the image. (ex:--maxZshift_percent=25)(default:25)")
+    parser.add_argument("--segment_otsu", default=True, type=str2bool,
+                        help="This sets the segmentation algorithum. THe default is the otsu segmentation. If set to false the Chan vase segmenation is used. For chan vase --seg_interations, --seg_smooth, and --checkerboard_size are used. Set to false if more then 2 classes are required for segmentation.(ex:--segment_otsu=True)(default:True)")
     return parser
 
 
@@ -189,6 +185,15 @@ def main(args):
     # append values?
     # memorize function? --> only if use same input multipel times... basically makes dictionary
     # use hashing to store variables?
+
+    # todo addd nosie2self deep learning. Load ALL data in folder to train model then add option to denoise with this model instead of classical denoise approaches
+    # step1: load ALL DATA
+    # step1.5: remove blank data from tranining? is max>>>>mean?
+    # step2: train noise2self
+    # step 3: use this data to load in code below--> so replace Raw with this (and skip denoise below)
+    # denoise_noise2self
+    # or this?https://github.com/COMP6248-Reproducability-Challenge/selfsupervised-denoising
+
     count_Z_folder = 0  # this counts for all Z folder
     for pathi in range(int(args.remotesubjectpath.__len__())):
         remotesubjectpath_one = args.remotesubjectpath[pathi]
@@ -215,6 +220,8 @@ def main(args):
         if not os.path.isdir(args.localsubjectpath + '/' + args.output + '/'):
             os.mkdir(args.localsubjectpath + '/' + args.output + '/')
         # redefine local path to new folder
+
+        # todo take this out of pahti loop?
         args.localsubjectpath = args.localsubjectpath + '/' + args.output + '/'
         print("reading file name for file size")
         # get maximum Z
@@ -378,37 +385,29 @@ def main(args):
                                 desY_one = desY[:, :, 0]
                             else:
                                 warnings.warn("opticalZ_dir variable not defined correctly")
-                        # check if whole image is blank, if so then set to zero and skip feature detection?
-                        if blank_overlap and srcY_T_re_one.max() < args.blank_thres * srcY_T_re_one.mean():
-                            if args.denoise_all:
-                                srcY_T_re_denoise = np.zeros(srcY_T_re.shape)
-                            else:
-                                srcY_T_re_denoise = np.zeros(srcY_T_re_one.shape)
-                            print('Blank image at X {} Y {} Z{}, Skipping denoise, setting values to zero'.format(X, Y,
-                                                                                                                  Z))
+                        if args.denoise_all:
+                            srcY_T_re_denoise = func2d3d.denoise(srcY_T_re, args.FFT_max_gaussian, args.high_thres)
                         else:
-                            if args.denoise_all:
-                                srcY_T_re_denoise = func2d3d.denoise(srcY_T_re, args.FFT_max_gaussian, args.high_thres)
-                            else:
-                                srcY_T_re_denoise = func2d3d.denoise(srcY_T_re_one, args.FFT_max_gaussian,
-                                                                     args.high_thres)
+                            srcY_T_re_denoise = func2d3d.denoise(srcY_T_re_one, args.FFT_max_gaussian, args.high_thres)
                         if args.extra_figs:
                             plt.figure()
-                            plt.imshow(srcY_T_re_one)
+                            plt.imshow(srcY_T_re_one)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                             name = 'X={}_Y={}_Z={}'.format(X, Y, Z)
                             plt.savefig(args.localsubjectpath + name + '_raw.png', format='png')
                             plt.close()
                             plt.figure()
                             if args.denoise_all:
-                                plt.imshow(np.max(srcY_T_re_denoise, axis=2))
+                                plt.imshow(np.max(srcY_T_re_denoise,
+                                                  axis=2))  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                             else:
-                                plt.imshow(srcY_T_re_denoise)
+                                plt.imshow(srcY_T_re_denoise)  #, norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                             name = 'X={}_Y={}_Z={}'.format(X, Y, Z)
                             plt.savefig(args.localsubjectpath + name + '_denoised.png', format='png')
                             plt.close()
                         del srcY_T, SKI_Trans_all, srcY, srcY_T_re_one
                         if X == 1:
                             if args.denoise_all:
+                                print('desY shape {}'.format(desY.shape))
                                 desY_denoise = func2d3d.denoise(desY, args.FFT_max_gaussian, args.high_thres)
                             else:
                                 desY_denoise = func2d3d.denoise(desY_one, args.FFT_max_gaussian, args.high_thres)
@@ -422,9 +421,10 @@ def main(args):
                             if args.extra_figs:
                                 plt.figure()
                                 if args.denoise_all:
-                                    plt.imshow(np.max(Y_img_denoise, axis=2))
+                                    plt.imshow(np.max(Y_img_denoise,
+                                                      axis=2))  #, norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                                 else:
-                                    plt.imshow(Y_img_denoise)
+                                    plt.imshow(Y_img_denoise)  #, norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                                 name = 'X={}_Y={}_Z={}'.format(X, Y, Z)
                                 plt.savefig(args.localsubjectpath + name + 'Y_img_denoise.png', format='png')
                                 plt.close()
@@ -450,9 +450,10 @@ def main(args):
                         if args.extra_figs:
                             plt.figure()
                             if args.denoise_all:
-                                plt.imshow(np.max(Yline_denoise, axis=2))
+                                plt.imshow(
+                                    np.max(Yline_denoise, axis=2))  #, norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                             else:
-                                plt.imshow(Yline_denoise)
+                                plt.imshow(Yline_denoise)  #, norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                             name = 'X={}_Y={}_Z={}'.format(X, Y, Z)
                             plt.savefig(args.localsubjectpath + name + 'Yline_denoise.png', format='png')
                             plt.close()
@@ -524,9 +525,10 @@ def main(args):
                     if args.extra_figs:
                         plt.figure()
                         if args.denoise_all:
-                            plt.imshow(np.max(srcZ_T_re_denoise, axis=2))
+                            plt.imshow(
+                                np.max(srcZ_T_re_denoise, axis=2))  #, norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                         else:
-                            plt.imshow(srcZ_T_re_denoise)
+                            plt.imshow(srcZ_T_re_denoise)  #, norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                         name = 'X={}_Y={}_Z={}'.format(X, Y, Z)
                         plt.savefig(args.localsubjectpath + name + 'srcZ_T_re_denoise.png', format='png')
                         plt.close()
@@ -567,9 +569,10 @@ def main(args):
                     if args.extra_figs:
                         plt.figure()
                         if args.denoise_all:
-                            plt.imshow(np.max(Z_img_denoise, axis=2))
+                            plt.imshow(
+                                np.max(Z_img_denoise, axis=2))  #, norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                         else:
-                            plt.imshow(Z_img_denoise)
+                            plt.imshow(Z_img_denoise)  #, norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                         name = 'X={}_Y={}_Z={}'.format(X, Y, Z)
                         plt.savefig(args.localsubjectpath + name + 'Z_img_denoise.png', format='png')
                         plt.close()
@@ -598,9 +601,9 @@ def main(args):
                 [src3d_denoise, des3d_denoise] = func2d3d.zero_pad(src3d_denoise, des3d_denoise, dim)
                 # get feature map for each optical slice with segmentation
                 src3d_feature = func2d3d.segmentation(src3d_denoise, args.checkerboard_size, args.seg_interations,
-                                                      args.seg_smooth)
+                                                      args.seg_smooth, args.localsubjectpath, Z, args.segment_otsu)
                 des3d_feature = func2d3d.segmentation(des3d_denoise, args.checkerboard_size, args.seg_interations,
-                                                      args.seg_smooth)
+                                                      args.seg_smooth, args.localsubjectpath, Z, args.segment_otsu)
                 # preform Z registration
                 src3d_T, src3d_T_feature, src3d_T_denoise, count_shiftZ, shiftZ, error_allZ = func2d3d.registration_Z(
                     src3d, src3d_denoise,
@@ -608,18 +611,22 @@ def main(args):
                     des3d_feature, count_shiftZ,
                     shiftZ, angleZ, args.apply_transform,
                     args.rigid_2d3d, args.error_overlap, args.find_rot, args.degree_thres, args.denoise_all,
-                    args.max_Z_proj_affine, args.seq_dir)
+                    args.max_Z_proj_affine, args.seq_dir, args.maxZshift_percent)
                 if args.extra_figs:
                     # make plots of Z plane
+                    plt.figure()
+                    plt.imshow(np.max(src3d, axis=2))  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
+                    plt.savefig(args.localsubjectpath + '/Z=' + str(Z) + '_Zplane_raw.png', format='png')
+                    plt.close()
                     plt.figure()
                     plt.imshow(src3d_T_feature)
                     plt.savefig(args.localsubjectpath + '/Z=' + str(Z) + '_Zplane_feature_shift.png', format='png')
                     plt.close()
                     plt.figure()
                     if args.denoise_all:
-                        plt.imshow(np.max(src3d_denoise, axis=2))
+                        plt.imshow(np.max(src3d_denoise, axis=2))  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                     else:
-                        plt.imshow(src3d_denoise)
+                        plt.imshow(src3d_denoise)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                     plt.savefig(args.localsubjectpath + '/Z=' + str(Z) + '_Zplane_denoise.png', format='png')
                     plt.close()
                     plt.figure()
@@ -754,6 +761,8 @@ def main(args):
     from myterial import orange
     import imio
     import bg_space as bg
+
+    #TODO: DO NOT register this to brina..... ONLY 1% of the brain is imaged!!!!
 
     
     #see: https://github.com/brainglobe/brainrender/blob/master/examples/user_volumetric_data.py
