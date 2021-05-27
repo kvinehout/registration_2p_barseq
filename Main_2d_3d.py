@@ -47,7 +47,6 @@ Step 3: Register Z planes together
 """
 
 print("importing modules")
-
 # Import modules
 import paramiko
 import os
@@ -59,10 +58,7 @@ import numpy as np
 import warnings
 import argparse
 import re
-# improt from 2d-3d functions
 import func_2d_3d as func2d3d
-import matplotlib
-
 # reload module
 # import importlib
 # importlib.reload(func2d3d)
@@ -70,7 +66,6 @@ import matplotlib
 print("loading path name and user defined settings")
 
 
-# HERE WE ASSUME 0,0 IS BOTTOM RIGHT
 def parse_args(add_help=True):
     # this adds help to main function
     parser = argparse.ArgumentParser(description='2d to 3D registration', add_help=add_help)
@@ -134,8 +129,8 @@ def parse_args(add_help=True):
                         help="This is used to save additional figured useful in troubleshooting, results saved in registration folder. (ex: --saved_transforms_path=True). (Default: Fasle)")
     parser.add_argument("--max_Z_proj_affine", default=True, type=str2bool,
                         help="This is used to use max Z projections instead of once slice for affine Z slice to Z slice calculateions. Set to true if images are  noisy, or false if low noise levels. (ex:--max_Z_proj_affine=True)(defualt:False)")
-    parser.add_argument("--high_thres", default=5, type=int,
-                        help="This is used to remove image artifacts with high intensiity. This is for images with high_thres > then the mena of the image. (ex:--high_thres=5)(default:5)")
+    parser.add_argument("--high_thres", default=10, type=int,
+                        help="This is used to remove image artifacts with high intensiity. This is for images with high_thres > then the meean of the image. Area threshold is set to 1/2 of the high_threshold as a percent of the image. So a value of 10 gives area threshold of 5% of the imaage or more (ex:--high_thres=10)(default:10)")
     parser.add_argument("--rigid_2d3d", default=False, type=str2bool,
                         help="This is used to only run rigid registratiion on feature map when combining Z planes, otherwise affine registration with optical flow is preformed.(ex:--rigid_2d3d=False)(default:False)")
     parser.add_argument("--output", default='registration', type=str,
@@ -150,10 +145,29 @@ def parse_args(add_help=True):
                         help="This is used place limits on the Z plane to Z plane translation. This is the percent of the image allowed for translation, if above this threhold set to 0 translation. The default is 25% of the image. (ex:--maxZshift_percent=25)(default:25)")
     parser.add_argument("--segment_otsu", default=True, type=str2bool,
                         help="This sets the segmentation algorithum. THe default is the otsu segmentation. If set to false the Chan vase segmenation is used. For chan vase --seg_interations, --seg_smooth, and --checkerboard_size are used. Set to false if more then 2 classes are required for segmentation.(ex:--segment_otsu=True)(default:True)")
+
+    parser.add_argument("--list_180_Z_rotation", default=None, type=int, nargs='+',
+                        help="This applys a 180 degree rotation to the provided Z planes, note Z value is defined as the total Z if multiple folder paths are given. If provided this value is given preferance to values calculated with auto_180_Z_rotation to rottae Z =0, Z=5 and Z=20 by 180 degrees see example (ex:--list_180_Z_rotation 0 5 20)(default:None})")
+
+    parser.add_argument("--list_manual_Z_crop", default=None, type=int, nargs='+',
+                        help="This gives the cropping image parameters for each Z plane, this helps Z plane to Z plane registration but requires aprioi information we need to provide X start, X end, Y start, Y end (ex:--list_manual_Z_crop 0 5 20)(default:None})")
+
+    parser.add_argument("--auto_180_Z_rotation", default=True, type=str2bool,
+                        help="This automatically searches for 180 degree rotations in images by running Z plane to Z plane registration twice and using best restult to ID if 180 rotation or not, if list_180_Z_rotation is set this values are used instead of automatically calculated values (ex:--auto_180_Z_rotation=True)(default:False)")
+
+    parser.add_argument("--Z_reg_denoise_or_feature", default='denoise', choices=['denoise', 'feature'],
+                        help="This defines what images to use for z plane to Zplane registration. Set to denoise to use denoise data, set to feature to use segmented or feature data (ex:--denoise_or_feature=denoise)(default:denoise)")
+
+    parser.add_argument("--Z_log_transform", default=False, type=str2bool,
+                        help="This applys a log transform after denoising to the Z plane data, use this is data has very low SNR (ex:--Z_log_transform=True)(default:False)")
+
     return parser
 
 
 def main(args):
+    # todo test below:
+    # list_manual_Z_crop[Z][Ystart,Yend,Xstart,Xend]
+
     print("starting registration program")
     # if apply transform is ture
     if args.apply_transform:
@@ -192,7 +206,7 @@ def main(args):
     # step2: train noise2self
     # step 3: use this data to load in code below--> so replace Raw with this (and skip denoise below)
     # denoise_noise2self
-    # or this?https://github.com/COMP6248-Reproducability-Challenge/selfsupervised-denoising
+    # or this?https://github.com/COMP6248-Reproducability-Challenge/selfsupervised-denoising or https://github.com/NVlabs/selfsupervised-denoising
 
     count_Z_folder = 0  # this counts for all Z folder
     for pathi in range(int(args.remotesubjectpath.__len__())):
@@ -221,7 +235,7 @@ def main(args):
             os.mkdir(args.localsubjectpath + '/' + args.output + '/')
         # redefine local path to new folder
 
-        # todo take this out of pahti loop?
+        # todo take this out of pathi loop?
         args.localsubjectpath = args.localsubjectpath + '/' + args.output + '/'
         print("reading file name for file size")
         # get maximum Z
@@ -421,8 +435,8 @@ def main(args):
                             if args.extra_figs:
                                 plt.figure()
                                 if args.denoise_all:
-                                    plt.imshow(np.max(Y_img_denoise,
-                                                      axis=2))  #, norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
+                                    plt.imshow(np.max(Y_img_denoise),
+                                               axis=2)  #, norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                                 else:
                                     plt.imshow(Y_img_denoise)  #, norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                                 name = 'X={}_Y={}_Z={}'.format(X, Y, Z)
@@ -599,11 +613,26 @@ def main(args):
                 dim = 1
                 [src3d, des3d] = func2d3d.zero_pad(src3d, des3d, dim)
                 [src3d_denoise, des3d_denoise] = func2d3d.zero_pad(src3d_denoise, des3d_denoise, dim)
+                # preform log transfromation on denoised data
+                # shift data so no negative values
+                if src3d_denoise.min() < 0:
+                    src3d_denoise = src3d_denoise + abs(src3d_denoise.min())
+                if des3d_denoise.min() < 0:
+                    des3d_denoise = des3d_denoise + abs(des3d_denoise.min())
+                # log transfrom data
+                if args.Z_log_transform:
+                    src3d_denoise = np.log1p(src3d_denoise)
+                    des3d_denoise = np.log1p(des3d_denoise)
                 # get feature map for each optical slice with segmentation
                 src3d_feature = func2d3d.segmentation(src3d_denoise, args.checkerboard_size, args.seg_interations,
-                                                      args.seg_smooth, args.localsubjectpath, Z, args.segment_otsu)
+                                                      args.seg_smooth, args.localsubjectpath, Z, args.segment_otsu,
+                                                      args.extra_figs)
+
+                Zold = Z - 1  # define old Z for naming
                 des3d_feature = func2d3d.segmentation(des3d_denoise, args.checkerboard_size, args.seg_interations,
-                                                      args.seg_smooth, args.localsubjectpath, Z, args.segment_otsu)
+                                                      args.seg_smooth, args.localsubjectpath, Zold, args.segment_otsu,
+                                                      args.extra_figs)
+
                 # preform Z registration
                 src3d_T, src3d_T_feature, src3d_T_denoise, count_shiftZ, shiftZ, error_allZ = func2d3d.registration_Z(
                     src3d, src3d_denoise,
@@ -611,7 +640,9 @@ def main(args):
                     des3d_feature, count_shiftZ,
                     shiftZ, angleZ, args.apply_transform,
                     args.rigid_2d3d, args.error_overlap, args.find_rot, args.degree_thres, args.denoise_all,
-                    args.max_Z_proj_affine, args.seq_dir, args.maxZshift_percent)
+                    args.max_Z_proj_affine, args.seq_dir, args.maxZshift_percent, Z, args.list_180_Z_rotation,
+                    args.auto_180_Z_rotation, args.localsubjectpath, args.list_manual_Z_crop,
+                    args.Z_reg_denoise_or_feature)
                 if args.extra_figs:
                     # make plots of Z plane
                     plt.figure()
@@ -662,18 +693,8 @@ def main(args):
                         d3_img_feature = np.concatenate((des3d_feature, src3d_T_feature), axis=2)
                     else:
                         warnings.warn("WARNING: seq_dir variable not defined properly: Use 'top' or 'bottom'")
-                    del des3d, src3d_T, src3d_T_feature, des3d_feature
+                    del des3d, src3d_T_feature, des3d_feature
                 else:
-                    # expand feature map dimensions if needed
-                    if src3d_T_feature.ndim == 2:
-                        src3d_T_feature = np.expand_dims(src3d_T_feature, axis=-1)  # expand dim for added unit
-                    if d3_array_feature.ndim == 2:
-                        d3_array_feature = np.expand_dims(d3_array_feature, axis=-1)  # expand dim for added unit
-                    # this is done if denoise_all is not selected then ndim==2
-                    if d3_array_denoise.ndim == 2:
-                        d3_array_denoise = np.expand_dims(d3_array_denoise, axis=-1)
-                    if src3d_T_denoise.ndim == 2:
-                        src3d_T_denoise = np.expand_dims(src3d_T_denoise, axis=-1)
                     # pad the 3D image in the Y
                     # pad in the Y
                     dim = 0
@@ -685,6 +706,16 @@ def main(args):
                     [d3_array, src3d_T] = func2d3d.zero_pad(d3_array, src3d_T, dim)
                     [d3_array_denoise, src3d_T_denoise] = func2d3d.zero_pad(d3_array_denoise, src3d_T_denoise, dim)
                     [d3_array_feature, src3d_T_feature] = func2d3d.zero_pad(d3_array_feature, src3d_T_feature, dim)
+                    # expand feature map dimensions if needed
+                    if src3d_T_feature.ndim == 2:
+                        src3d_T_feature = np.expand_dims(src3d_T_feature, axis=-1)  # expand dim for added unit
+                    if d3_array_feature.ndim == 2:
+                        d3_array_feature = np.expand_dims(d3_array_feature, axis=-1)  # expand dim for added unit
+                    # this is done if denoise_all is not selected then ndim==2
+                    if d3_array_denoise.ndim == 2:
+                        d3_array_denoise = np.expand_dims(d3_array_denoise, axis=-1)
+                    if src3d_T_denoise.ndim == 2:
+                        src3d_T_denoise = np.expand_dims(src3d_T_denoise, axis=-1)
                     if args.seq_dir == 'top':  # this is top if POS1 is above POS 0 and 'bottom' if POS 1 is below POS 0
                         d3_img = np.concatenate((src3d_T, d3_array), axis=2)
                         d3_img_denoise = np.concatenate((src3d_T_denoise, d3_array_denoise), axis=2)
@@ -695,12 +726,14 @@ def main(args):
                         d3_img_feature = np.concatenate((d3_array_feature, src3d_T_feature), axis=2)
                     else:
                         warnings.warn("WARNING: seq_dir variable not defined properly: Use 'top' or 'bottom'")
-                    del src3d_T, src3d_T_feature
+                    del src3d_T_feature
                 d3_array = d3_img  # Z_img[int(abs(target_overlapY + shift[0])):, :]  # this removes Zeros that are due to shift
                 d3_array_denoise = d3_img_denoise  # Z_img[int(abs(target_overlapY + shift[0])):, :]  # this removes Zeros that are due to shift
                 d3_array_feature = d3_img_feature
-                Zplane_old = Zplane
-                del Zplane, d3_img, d3_img_feature, d3_img_denoise
+                # rename the source to be used as destination for next round --> USE SHIFTED source
+                Zplane_old = src3d_T  # Zplane
+                Zplane_old_denoise = src3d_T_denoise  # Zplane_denoise
+                del Zplane, Zplane_denoise, d3_img, d3_img_feature, d3_img_denoise, src3d_T, src3d_T_denoise
             count_Z_folder = count_Z_folder + 1
     # DO THIS AFTER ALL folders
     del Zplane_old
@@ -733,6 +766,26 @@ def main(args):
     np.savez_compressed(save_folder + args.image_type + '_d3_array', d3_array)
 
     # make videos/images
+    """
+    #try https://github.com/marcomusy/vedo
+
+    import numpy as np
+    import ipyvolume as ipv #https://ipyvolume.readthedocs.io/en/latest/
+    V = np.zeros((128, 128, 128))  # our 3d array
+    # outer box
+    V[30:-30, 30:-30, 30:-30] = 0.75
+    V[35:-35, 35:-35, 35:-35] = 0.0
+    # inner box
+    V[50:-50, 50:-50, 50:-50] = 0.25
+    V[55:-55, 55:-55, 55:-55] = 0.0
+    ipv.quickvolshow(V, level=[0.25, 0.75], opacity=0.03, level_width=0.1, data_min=0, data_max=1)
+    ipv.pylab.save('/Users/kaleb/Documents/CSHL/2d_3D_linear_reg/test', makedirs=True, title='IPyVolume Widget', all_states=False, offline=False,
+                         scripts_path='js', drop_defaults=False,
+                         template_options=(('extra_script_head', ''), ('body_pre', ''), ('body_post', '')),
+                         devmode=False, offline_cors=False)
+
+    ipv.pylab.savefig('/Users/kaleb/Documents/CSHL/2d_3D_linear_reg/testfig.png', width=None, height=None, fig=None, timeout_seconds=10, output_widget=None,
+                            headless=False, devmode=False)
 
     # make and save video of the result
     # import imageio
@@ -744,7 +797,7 @@ def main(args):
     # gif_filename_slide = '3D_brain_slide.gif'
     # gif_slide_full_path = args.localsubjectpath + gif_filename_slide
     # imageio.mimsave(gif_slide_full_path, images)
-
+    """
     """
         This example shows how to render volumetric (i.e. organized in voxel)
         data in brainrender. The data used are is the localized expression of 
@@ -761,6 +814,30 @@ def main(args):
     from myterial import orange
     import imio
     import bg_space as bg
+
+    #load data
+    from imio import load
+    mydata=load.load_any('/Users/kaleb/Downloads/T_AVG_s1019tEt_GFP.tif')
+
+    #volume data:
+    from brainrender.actors import Volume
+    import numpy as np
+    vol = Volume(mydata) 
+    
+    mesh = (vol.isosurface(vol))
+    
+    
+    #render data
+    from brainrender import Scene, actors
+    scene = Scene()
+    scene.add(actors.Volume(vol))
+ 
+
+
+
+
+
+
 
     #TODO: DO NOT register this to brina..... ONLY 1% of the brain is imaged!!!!
 

@@ -7,48 +7,49 @@ Created on Nov 24th 2020
 
 This code combines 2D data into 3d volume, functions for this code
 """
-import operator
 import os
 import re
 import warnings
 from shutil import copyfile
 # import ants
 import matplotlib.pyplot as plt
-import matplotlib
 import numpy as np
 # import modules
 import paramiko
 import skimage
 import skimage.registration
 import skimage.segmentation
-import scipy
 import skimage.transform
 from PIL import Image, ImageOps, ImageChops
-from skimage import filters  # need to load filter package from skimage
+from skimage import filters
 from skimage import restoration
-from sklearn.neighbors import NearestNeighbors
 import cv2
 import imreg_dft as ird
 import math
-from matplotlib import gridspec
-from skimage.data import chelsea, hubble_deep_field
-from skimage.metrics import mean_squared_error as mse
-from skimage.metrics import peak_signal_noise_ratio as psnr
 from skimage.restoration import (calibrate_denoiser, denoise_wavelet, denoise_tv_chambolle, denoise_nl_means,
                                  estimate_sigma)
 from skimage.util import img_as_float, random_noise
-from skimage.color import rgb2gray
-from functools import partial
 from skimage.restoration.j_invariant import _invariant_denoise
 import matplotlib.patches as mpatches
-from skimage.filters import threshold_otsu
 from skimage.segmentation import clear_border
 from skimage.measure import label, regionprops
 from skimage.morphology import closing, square, binary_dilation, disk, square, area_opening, opening
 from skimage.color import label2rgb
 import itk
 from skimage.filters import threshold_multiotsu
+from PIL import Image
+import sys
+
 import matplotlib
+import scipy
+import operator
+from skimage.color import rgb2gray
+from functools import partial
+from matplotlib import gridspec
+from skimage.data import chelsea, hubble_deep_field
+from skimage.metrics import mean_squared_error as mse
+from skimage.metrics import peak_signal_noise_ratio as psnr
+from sklearn.neighbors import NearestNeighbors
 
 
 # import ICP
@@ -194,6 +195,7 @@ def remove_large_obj(A, area_thres, int_thres, FFT_max_gaussian, high_thres_dec)
         # 21743 is with object adn 1015 is without object
         # remove large objects (if needed)
     """
+    ori_A = np.copy(A)
     filt_A = skimage.filters.difference_of_gaussians(A, 1, FFT_max_gaussian)
     # denoise with wavlet this might not have much of an effect
     denoise = skimage.restoration.denoise_wavelet(filt_A, multichannel=False, rescale_sigma=True)
@@ -215,7 +217,7 @@ def remove_large_obj(A, area_thres, int_thres, FFT_max_gaussian, high_thres_dec)
     image_label_overlay = label2rgb(label_image, image=A, bg_label=0)
     for region in regionprops(label_image, intensity_image=A):
         # take regions with large enough areas
-        if region.area >= area_thres and region.max_intensity >= int_thres:
+        if region.area >= area_thres ** 2 and region.max_intensity >= int_thres:
             warnings.warn(message='Large high intensity artifact found, removing artifact')
             # define this as a mask to REMOVE from image
             # for this box set value to zero? mean? median?
@@ -243,11 +245,17 @@ def remove_large_obj(A, area_thres, int_thres, FFT_max_gaussian, high_thres_dec)
             rect = mpatches.Rectangle((minc, minr), maxc - minc, maxr - minr, fill=False, edgecolor='red', linewidth=2)
     mask_A_raw = A
     mask_A = np.array(mask_A_raw)
+    # remove extra dimensions
+    mask_A = np.squeeze(mask_A)
+    if mask_A.ndim > 2:
+        warnings.warn(message='wrong dimensions in high intensity image. Size found of {}'.format(mask_A.shape))
+    # make data type same as input
+    mask_A = mask_A.astype(ori_A.dtype)
     return mask_A
 
 
 def denoise_noise2self(A, FFT_max_gaussian, high_thres):
-    # try noise2noise traiing? https://github.com/czbiohub/noise2self
+    # try noise2noise traiing? https://github.com/czbiohub/noise2self or https://github.com/NVlabs/selfsupervised-denoising
     """
     noisy_image = imarray3D_mean_512
     import sys
@@ -451,7 +459,7 @@ def denoise(A, FFT_max_gaussian, high_thres):
         -	denoised: denoised image
 
     """
-    sigma_est_ori = np.mean(skimage.restoration.estimate_sigma(A, multichannel=False))
+    sigma_est_ori = np.max(skimage.restoration.estimate_sigma(A, multichannel=False))
     print(f"estimated noise standard deviation = {sigma_est_ori}")
     # remove extremely high values --> remove hair
     if (A > (high_thres * A.mean())).any() and A.ndim == 2:
@@ -461,8 +469,7 @@ def denoise(A, FFT_max_gaussian, high_thres):
         int_thres = (high_thres * A.mean())
         area_thres = A.shape[1] * (high_thres_dec / 2)
         A = remove_large_obj(A, area_thres, int_thres, FFT_max_gaussian, high_thres_dec)
-        # remove extra dimensions
-        A = np.squeeze(A)
+
 
     # remove salt and peper with TV norm, wavlet or non-local means
     # calibrate TV norm
@@ -562,7 +569,7 @@ def remove_zero_segmntation(A_seg, A, Z):
     return A_seg, all_zero_seg
 
 
-def segmentation(A, checkerboard_size, seg_interations, seg_smooth, localsubjectpath, Z, segment_otsu):
+def segmentation(A, checkerboard_size, seg_interations, seg_smooth, localsubjectpath, Z, segment_otsu, extra_figs):
     """
     This segments the image with chan vase
         Args:
@@ -606,16 +613,55 @@ def segmentation(A, checkerboard_size, seg_interations, seg_smooth, localsubject
             thresholds = threshold_multiotsu(A, classes=3)
             A_seg = np.digitize(A, bins=thresholds)
             A_seg, all_zero_seg = remove_zero_segmntation(A_seg, A, Z)
+
+    # check to make sure segmented values start at zero
+    if A_seg.min() != 0:
+        A_seg = A_seg - A_seg.min()
+        warnings.warn(
+            "Warning: Z image {} segmentation starts at nonzero, shifting to zero segmentation ".format(str(Z)))
+
     # check to make sure background =0 and segment brain is =1
     if np.count_nonzero(A_seg == A_seg.max()) > np.count_nonzero(A_seg == 0):
         # inverse image
         A_seg = A_seg.max() - A_seg
         warnings.warn(
             "Warning: Z image {} segmentation of background labeled high, inverting segmentation ".format(str(Z)))
+
+    # todo remove grid lines in segmented image
+    # A_seg_gray = np.interp(A_seg, (A_seg.min(), A_seg.max()), (0, +255))
+    # change dtype to unit 8 --> so get rid of decimals
+    # A_seg_gray = A_seg_gray.astype(np.uint8)
+    # img_gauss = cv2.GaussianBlur(A_seg_gray, ksize=(13, 13), sigmaX=10)
+    # ret, img_gauss_th = cv2.threshold(img_gauss, thresh=127, maxval=255, type=cv2.THRESH_BINARY)
+    # edges = cv2.Canny(image=img_gauss_th, threshold1=240, threshold2=255)
+    # edges_smoothed = cv2.GaussianBlur(edges, ksize=(5, 5), sigmaX=10)
+    # lines = cv2.HoughLinesP(edges_smoothed, rho=1, theta=1 * np.pi / 180, threshold=40, minLineLength=30, maxLineGap=25)
+    # img_hough_lines_contours = np.ones(A_seg_gray.shape)
+    # line_nos = lines.shape[0]
+    # for i in range(line_nos):
+    #    x_1 = lines[i][0][0]
+    #    y_1 = lines[i][0][1]
+    #    x_2 = lines[i][0][2]
+    #    y_2 = lines[i][0][3]
+    #    cv2.line(A_seg, pt1=(x_1, y_1), pt2=(x_2, y_2), color=(255, 0, 0), thickness=2)
+    # img_hough_lines = A_seg_gray.copy()
+    # img_hough_lines[img_hough_lines_contours == 0] = 255
+
+    if extra_figs:
+        plt.figure()
+        plt.imshow(A)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
+        plt.savefig(localsubjectpath + '/Z=' + str(Z) + '_Zplane_raw_plane.png', format='png')
+        plt.close()
+        plt.figure()
+        plt.imshow(A_seg)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
+        plt.savefig(localsubjectpath + '/Z=' + str(Z) + '_Zplane_segmented_plan.png', format='png')
+        plt.close()
     return A_seg
 
 
 def feature_CV2(destination_raw, source_raw, diroverlap, FFT_max_gaussian, high_thres, localsubjectpath, input_overlap):
+    # todo try https://scikit-image.org/docs/dev/auto_examples/features_detection/plot_brief.html#sphx-glr-auto-examples-features-detection-plot-brief-py
+    # https://scikit-image.org/docs/dev/auto_examples/features_detection/plot_orb.html#sphx-glr-auto-examples-features-detection-plot-orb-py
     """This finds the overlay given A and B with feature based registration
         Args:
         -	A: 3D set of images to overlap source (moving image)
@@ -627,8 +673,8 @@ def feature_CV2(destination_raw, source_raw, diroverlap, FFT_max_gaussian, high_
         Returns:
         -	target_overlap: pixel number of overlay
     """
-    destination_mean = np.mean(destination_raw, axis=2)
-    source_mean = np.mean(source_raw, axis=2)
+    destination_mean = np.max(destination_raw, axis=2)
+    source_mean = np.max(source_raw, axis=2)
     # denoise image
     destination_denoise = denoise(destination_mean, FFT_max_gaussian, high_thres)
     source_denoise = denoise(source_mean, FFT_max_gaussian, high_thres)
@@ -641,10 +687,9 @@ def feature_CV2(destination_raw, source_raw, diroverlap, FFT_max_gaussian, high_
     # change dtype to unit 8 --> so get rid of decimals
     destination = destination.astype(np.uint8)
     source = source.astype(np.uint8)
-    from PIL import Image
-    im_src3d = Image.fromarray(destination)
+    im_src3d = Image.fromarray(source)
     im_src3d.save(localsubjectpath + "src3d_denoise.jpeg")
-    im_des3d = Image.fromarray(source)
+    im_des3d = Image.fromarray(destination)
     im_des3d.save(localsubjectpath + "des3d_denoise.jpeg")
     # Read reference imagw
     refFilename = '{}/{}'.format(localsubjectpath, 'des3d_denoise.jpeg')
@@ -663,53 +708,60 @@ def feature_CV2(destination_raw, source_raw, diroverlap, FFT_max_gaussian, high_
     orb = cv2.ORB_create(MAX_MATCHES)
     keypoints1, descriptors1 = orb.detectAndCompute(im1Gray, None)
     keypoints2, descriptors2 = orb.detectAndCompute(im2Gray, None)
-    # Match features. # get SAME NUMBER OF points for source and destination??? https://www.youtube.com/watch?v=cA8K8dl-E6k
-    # matcher = cv2.DescriptorMatcher_create(cv2.DESCRIPTOR_MATCHER_BRUTEFORCE_SL2)#BRUTEFORCE_HAMMING)
-    # matches = matcher.match(descriptors1, descriptors2, None)
-    # create BFMatcher object
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-    # Match descriptors.
-    matches = bf.match(descriptors1, descriptors2)
-    # Sort matches by score
-    matches.sort(key=lambda x: x.distance, reverse=False)
-    # Remove not so good matches
-    numGoodMatches = int(len(matches) * GOOD_MATCH_PERCENT)
-    # matches = matches[:numGoodMatches]
-    # Draw top matches
-    imMatches = cv2.drawMatches(im1, keypoints1, imReference, keypoints2, matches, None)
-    cv2.imwrite(localsubjectpath + "/matches.jpg", imMatches)
-    # Extract location of good matches
-    points1 = np.zeros((len(matches), 2), dtype=np.float32)
-    points2 = np.zeros((len(matches), 2), dtype=np.float32)
-    for i, match in enumerate(matches):
-        points1[i, :] = keypoints1[match.queryIdx].pt
-        points2[i, :] = keypoints2[match.trainIdx].pt
-    # Find Affine Transformation
-    # note swap of order of newpoints here so that image2 is warped to match image1
-    # if not enough points match --> set to input_overlap or warning message to add overlap
-    if points1.shape[0] < 2 or points1.shape[0] < 2:
+    if np.any(descriptors1) == None or np.any(descriptors2) == None:
         if input_overlap == None:
             warnings.warn("ERROR: CAN NOT CALCULATE IMAGE OVERLAP PLEASE PROVIDE --input_overlap VALUE")
         else:
             warnings.warn("Warning: Can not calculate image overlap, instead using input_overlap value")
             target_overlap = input_overlap
     else:
-        m, inliers = cv2.estimateAffinePartial2D(points1, points2)
-        # Use affine transform to warp im2 to match im1
-        height, width = imReference.shape
-        im1Reg = cv2.warpAffine(im1, m, (width, height))
-        shift[0] = m[1, 2]
-        shift[1] = m[0, 2]
-        error = 0  # todo add this?
-        # abs used below so source or destination order doesnt matter and subject from edge to get overlap value
-        if diroverlap == 'up' or diroverlap == 'down':
-            target_overlap = source_raw.shape[0] - abs(int(round(shift[0])))
-        elif diroverlap == 'left' or diroverlap == 'right':
-            target_overlap = source_raw.shape[1] - abs(int(round(shift[1])))
+        # Match features. # get SAME NUMBER OF points for source and destination??? https://www.youtube.com/watch?v=cA8K8dl-E6k
+        # matcher = cv2.DescriptorMatcher_create(cv2.DESCRIPTOR_MATCHER_BRUTEFORCE_SL2)#BRUTEFORCE_HAMMING)
+        # matches = matcher.match(descriptors1, descriptors2, None)
+        # create BFMatcher object
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        # Match descriptors.
+        matches = bf.match(descriptors1, descriptors2)
+        # Sort matches by score
+        matches.sort(key=lambda x: x.distance, reverse=False)
+        # Remove not so good matches
+        numGoodMatches = int(len(matches) * GOOD_MATCH_PERCENT)
+        # matches = matches[:numGoodMatches]
+        # Draw top matches
+        imMatches = cv2.drawMatches(im1, keypoints1, imReference, keypoints2, matches, None)
+        cv2.imwrite(localsubjectpath + "/matches.jpg", imMatches)
+        # Extract location of good matches
+        points1 = np.zeros((len(matches), 2), dtype=np.float32)
+        points2 = np.zeros((len(matches), 2), dtype=np.float32)
+        for i, match in enumerate(matches):
+            points1[i, :] = keypoints1[match.queryIdx].pt
+            points2[i, :] = keypoints2[match.trainIdx].pt
+        # Find Affine Transformation
+        # note swap of order of newpoints here so that image2 is warped to match image1
+        # if not enough points match --> set to input_overlap or warning message to add overlap
+        if points1.shape[0] < 2 or points1.shape[0] < 2:
+            if input_overlap == None:
+                warnings.warn("ERROR: CAN NOT CALCULATE IMAGE OVERLAP PLEASE PROVIDE --input_overlap VALUE")
+            else:
+                warnings.warn("Warning: Can not calculate image overlap, instead using input_overlap value")
+                target_overlap = input_overlap
         else:
-            warnings.warn(
-                "WARNING: diroverlap not defined correctly, Set to down, up, left or right. Currently set to {} ".format(
-                    diroverlap))
+            m, inliers = cv2.estimateAffinePartial2D(points1, points2)
+            # Use affine transform to warp im2 to match im1
+            height, width = imReference.shape
+            im1Reg = cv2.warpAffine(im1, m, (width, height))
+            shift[0] = m[1, 2]
+            shift[1] = m[0, 2]
+            error = 0  # todo add this?
+            # abs used below so source or destination order doesnt matter and subject from edge to get overlap value
+            if diroverlap == 'up' or diroverlap == 'down':
+                target_overlap = source_raw.shape[0] - abs(int(round(shift[0])))
+            elif diroverlap == 'left' or diroverlap == 'right':
+                target_overlap = source_raw.shape[1] - abs(int(round(shift[1])))
+            else:
+                warnings.warn(
+                    "WARNING: diroverlap not defined correctly, Set to down, up, left or right. Currently set to {} ".format(
+                        diroverlap))
     return target_overlap,
 
 
@@ -786,6 +838,10 @@ def zero_pad(A, B, dim):
 
     """
 
+    # remove extra dimensions
+    A = np.squeeze(A)
+    B = np.squeeze(B)
+
     data_dype = A.dtype
 
     if A.ndim == 2 and B.ndim == 2:
@@ -808,6 +864,44 @@ def zero_pad(A, B, dim):
             A_pad = A
 
     elif A.ndim == 3 and B.ndim == 3:
+        if A.shape[dim] > B.shape[dim]:
+            # B_pad = np.zeros(A.shape)  # * np.mean(srcZ_T_re)
+            if dim == 1:
+                B_pad = np.zeros([B.shape[0], A.shape[1], B.shape[2]], dtype=data_dype)
+            elif dim == 0:
+                B_pad = np.zeros([A.shape[0], B.shape[1], B.shape[2]], dtype=data_dype)
+            B_pad[:B.shape[0], :B.shape[1], :B.shape[2]] = B
+        else:
+            B_pad = B
+        if B.shape[dim] > A.shape[dim]:
+            if dim == 1:
+                A_pad = np.zeros([A.shape[0], B.shape[1], A.shape[2]], dtype=data_dype)
+            elif dim == 0:
+                A_pad = np.zeros([B.shape[0], A.shape[1], A.shape[2]], dtype=data_dype)
+            A_pad[:A.shape[0], :A.shape[1], :A.shape[2]] = A
+        else:
+            A_pad = A
+    elif A.ndim == 2 and B.ndim == 3:
+        A = np.expand_dims(A, axis=-1)  # expand dim for added unit
+        if A.shape[dim] > B.shape[dim]:
+            # B_pad = np.zeros(A.shape)  # * np.mean(srcZ_T_re)
+            if dim == 1:
+                B_pad = np.zeros([B.shape[0], A.shape[1], B.shape[2]], dtype=data_dype)
+            elif dim == 0:
+                B_pad = np.zeros([A.shape[0], B.shape[1], B.shape[2]], dtype=data_dype)
+            B_pad[:B.shape[0], :B.shape[1], :B.shape[2]] = B
+        else:
+            B_pad = B
+        if B.shape[dim] > A.shape[dim]:
+            if dim == 1:
+                A_pad = np.zeros([A.shape[0], B.shape[1], A.shape[2]], dtype=data_dype)
+            elif dim == 0:
+                A_pad = np.zeros([B.shape[0], A.shape[1], A.shape[2]], dtype=data_dype)
+            A_pad[:A.shape[0], :A.shape[1], :A.shape[2]] = A
+        else:
+            A_pad = A
+    elif A.ndim == 3 and B.ndim == 2:
+        B = np.expand_dims(B, axis=-1)  # expand dim for added unit
         if A.shape[dim] > B.shape[dim]:
             # B_pad = np.zeros(A.shape)  # * np.mean(srcZ_T_re)
             if dim == 1:
@@ -1183,273 +1277,165 @@ def rmsdiff(source, source_transformed, destination):
     return rms
 
 
+def zca_whitening_matrix(X):
+    """
+    Function to compute ZCA whitening matrix (aka Mahalanobis whitening).
+    INPUT:  X: [M x N] matrix.
+        Rows: Variables
+        Columns: Observations
+    OUTPUT: ZCAMatrix: [M x M] matrix
+    """
+    # Covariance matrix [column-wise variables]: Sigma = (X-mu)' * (X-mu) / N
+    sigma = np.cov(X, rowvar=True)  # [M x M]
+    # Singular Value Decomposition. X = U * np.diag(S) * V
+    U, S, V = np.linalg.svd(sigma)
+    # U: [M x M] eigenvectors of sigma.
+    # S: [M x 1] eigenvalues of sigma.
+    # V: [M x M] transpose of U
+    # Whitening constant: prevents division by zero
+    epsilon = 1e-5
+    # ZCA Whitening matrix: U * Lambda * U'
+    ZCAMatrix = np.dot(U, np.dot(np.diag(1.0 / np.sqrt(S + epsilon)), U.T))  # [M x M]
+    return ZCAMatrix
+
+
 # TRY 180 degrees:
 # des3d_denoise_rotated = skimage.transform.rotate(des3d_denoise, 5)
 
 # TODO make the function below:
 
-def ridgid_registration(destination_denoise, destination_feature, source_denoise, source_feature):
+def auto_detect_180(destination_feature, source_feature, localsubjectpath):
     """
-    #http://elastix.bigr.nl/wiki/index.php/Par0013
+    This finds if 180 is found or not. This uses elastix.
+    Documentation of elastix at: https://elastix.lumc.nl/doxygen/index.html and http://elastix.bigr.nl/wiki/index.php/Par0013
+    input:
+    destination_feature: destination image
+    source_feature: source image
+    localsubjectpath: path to save files
 
-    Documentation of elastix at: https://elastix.lumc.nl/doxygen/index.html
 
-    destination_denoise=np.load('/Volumes/Backup5TB/2d_3D_linear_reg/des3d_denoise.npy')
-    source_denoise=np.load('/Volumes/Backup5TB/2d_3D_linear_reg/src3d_denoise.npy')
-    destination_feature=np.load('/Volumes/Backup5TB/2d_3D_linear_reg/des3d_feature.npy')
-    source_feature=np.load('/Volumes/Backup5TB/2d_3D_linear_reg/src3d_feature.npy')
+    output:
+    new_angle_rad: angle eaither 180 or 0 if 180 rotation detected
     """
-
-    source_denoise = skimage.transform.rotate(source_denoise, 25)
-    destination_feature = skimage.transform.rotate(destination_feature, 25)
-
-    Trans_test = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=0, translation=(357, 198))
-    # apply to image in src3d feature map
-    destination_feature_trans = skimage.transform.warp(destination_feature, Trans_test._inv_matrix, order=0,
-                                                       mode='edge', preserve_range=True)
-    destination_feature_rot_trans = skimage.transform.rotate(destination_feature_trans, 180)
-
+    # rotate image by theta_rad, set to 180 or 0 in Z registration code
+    # source_feature = skimage.transform.rotate(source_feature, math.degrees(theta_rad)) #here we want to use segmented image b/c intensity of blood vessesl isnt meaninful
     # convert data to work with elastix software package
-    destination_denoise = destination_denoise.astype(np.float32)
-    source_denoise = source_denoise.astype(np.float32)
-    fixed_image_denoise = itk.image_from_array(destination_denoise)
-    moving_image_denoise = itk.image_from_array(source_denoise)
     destination_feature = destination_feature.astype(np.float32)
     source_feature = source_feature.astype(np.float32)
     fixed_image_feature = itk.image_from_array(destination_feature)
     moving_image_feature = itk.image_from_array(source_feature)
-
-    # Import and adjust Parameter Map
-    parameter_object = itk.ParameterObject.New()
-    default_rigid_parameter_map = parameter_object.GetDefaultParameterMap('rigid')
-    parameter_object.AddParameterMap(default_rigid_parameter_map)
-    parameter_object.SetParameter("NumberOfResolutions", "4")
-    # parameter_object.SetParameter("Transform", "EulerTransform")  # this is rigid
-    parameter_object.SetParameter("Transform", "TranslationTransform")  # this is rigid
-
-    # parameter_object.SetParameter("Optimizer", "Simplex")
-    # parameter_object.SetParameter("FixedInternalImagePixelType", "float")
-    # parameter_object.SetParameter("MovingInternalImagePixelType", "float")
-    # parameter_object.SetParameter("Registration", "MultiResolutionRegistration")
-    # parameter_object.SetParameter("Metric", "PatternIntensity")
-    # parameter_object.SetParameter("WriteResultImage", "true")
-    # parameter_object.SetParameter("WriteTransformParametersEachIteration", "true")
-    # parameter_object.SetParameter("ResultImagePixelType", "float")
-    parameter_object.SetParameter("FinalBSplineInterpolationOrder", "0")
-
-    # Import and adjust Parameter Map
+    # define parameter file
     parameter_object = itk.ParameterObject.New()
     default_rigid_parameter_map = parameter_object.GetDefaultParameterMap('rigid')
     parameter_object.AddParameterMap(default_rigid_parameter_map)
     parameter_object.SetParameter("Transform", "EulerTransform")  # this is rigid
-    # parameter_object.SetParameter("Optimizer", "AdaptiveStochasticGradientDescent")
-    parameter_object.SetParameter("Optimizer", "StandardGradientDescent")  # this allows me to pick step size
+    parameter_object.SetParameter("Optimizer",
+                                  "StandardGradientDescent")  # full search # this allows me to pick step size what about evolutionary strategy? FullSearch, ConjugateGradient, ConjugateGradientFRPR, QuasiNewtonLBFGS, RSGDEachParameterApart, SimultaneousPerturbation, CMAEvolutionStrategy.
     parameter_object.SetParameter("Registration", "MultiResolutionRegistration")
-    parameter_object.SetParameter("Metric", "AdvancedNormalizedCorrelation")
-    # parameter_object.SetParameter("WriteTransformParametersEachIteration", "true")
-    # parameter_object.SetParameter("ResultImagePixelType", "float")
-    # parameter_object.SetParameter("FinalBSplineInterpolationOrder", "0")
-    parameter_object.SetParameter("NewSamplesEveryIteration", "true")
-    parameter_object.SetParameter("MaximumNumberOfIterations", "5000")
-    # parameter_object.SetParameter("AutomaticScalesEstimation", "true") we want to set rotation and tranlation to both be large values
-    # parameter_object.SetParameter("AutomaticTransformInitialization", "true")
-    # parameter_object.SetParameter("ImageSampler", "RandomCoordinate")
-    # parameter_object.SetParameter("FixedImageBSplineInterpolationOrder", "3")
-    # parameter_object.SetParameter("UseRandomSampleRegion", "true")
-    parameter_object.SetParameter("DefaultPixelValue", "0")  # this is b/c background is 0
-    parameter_object.SetParameter("WriteResultImage", "true")
-    # parameter_object.SetParameter("RequiredRatioOfValidSamples", "0.0001")
-    # parameter_object.SetParameter("NumberOfHistogramBins", "32")
-    parameter_object.SetParameter("UseDirectionCosines", "false")
+    parameter_object.SetParameter("Metric",
+                                  "AdvancedKappaStatistic")  # "AdvancedNormalizedCorrelation") #AdvancedNormalizedCorrelation") #maybe AdvancedMattesMutualInformation
     parameter_object.SetParameter("FixedInternalImagePixelType", "float")
     parameter_object.SetParameter("MovingInternalImagePixelType", "float")
     parameter_object.SetParameter("FixedImageDimension", "2")
     parameter_object.SetParameter("MovingImageDimension", "2")
     parameter_object.SetParameter("FixedImagePyramid", "FixedRecursiveImagePyramid")  # smooth and downsample
     parameter_object.SetParameter("MovingImagePyramid", "MovingRecursiveImagePyramid")  # smooth and downsample
-    parameter_object.SetParameter("NumberOfResolutions",
-                                  "8")  # 1 resoultion b/c small deformaitons --> NOT sure... LARGE shifts
+    parameter_object.SetParameter("NumberOfResolutions", "6")  # high resoltuiions b/c large shifts
+    parameter_object.SetParameter("DefaultPixelValue", "0")  # this is b/c background is 0
+    parameter_object.SetParameter("ImageSampler",
+                                  "Grid")  # want full b/c random sampler would give different metric to compare results so full or grid should work, full is really slow
+    parameter_object.SetParameter("NewSamplesEveryIteration",
+                                  "false")  # want false b/c random sampler would give different metric to compare results
+    parameter_object.SetParameter("Scales", "1.0")  # this is so rotation and translation treated equally
+    parameter_object.SetParameter("UseDirectionCosines", "false")
+    parameter_object.SetParameter("AutomaticTransformInitialization", "true")
+    parameter_object.SetParameter("AutomaticTransformInitializationMethod", "GeometricalCenter")
+    parameter_object.SetParameter("UseComplement", "false")
+    parameter_object.SetParameter("WriteResultImage", "true")
+    parameter_object.SetParameter("MaximumNumberOfIterations", "500")
+    parameter_object.SetParameter("MaximumNumberOfSamplingAttempts", "3")
 
-    # parameter_object.SetParameter("AutomaticTransformInitialization", "true")
-    # parameter_object.SetParameter("AutomaticTransformInitializationMethod", "CenterOfGravity")
-    # parameter_object.SetParameter("ASGDParameterEstimationMethod", "DisplacementDistribution")
-    parameter_object.SetParameter("Scales",
-                                  "1.0")  # we want larGE rotation range 1.0 is the same step  in translation as rotation
-    # parameter_object.SetParameter("SP_alpha", "0.6")
-    # parameter_object.SetParameter("SP_A", "50000")
-    parameter_object.SetParameter("SP_a", "10000")  # this is for large steps
-    parameter_object.SetParameter("NumberOfSpatialSamples", "5000")
+    # note: This is something specific to our scope and probably would not generalize to data from other people. I would just rotate them manually for each dataset.
+    # rotate image 180 degrees
+    # source_denoise_180 = skimage.transform.rotate(source_denoise, 180)
+    # source_denoise_180 = source_denoise_180.astype(np.float32)
+    # moving_image_denoise_180 = itk.image_from_array(source_denoise_180)
+    source_feature_180 = skimage.transform.rotate(source_feature, 180)
+    source_feature_180 = source_feature_180.astype(np.float32)
+    moving_image_feature_180 = itk.image_from_array(source_feature_180)
+    # get registration metirc for 180 and original data
+    result_image, result_transform_parameters = itk.elastix_registration_method(fixed_image=fixed_image_feature,
+                                                                                moving_image=moving_image_feature,
+                                                                                parameter_object=parameter_object,
+                                                                                log_to_console=True, log_to_file=True,
+                                                                                output_directory=localsubjectpath)  # '/Users/kaleb/Documents/CSHL/2d_3D_linear_reg/')
+    # load localsubjectpath /elastix.log file
+    file1 = open(localsubjectpath + "elastix.log", "r")
+    string = file1.read()
+    m1 = re.search('Final metric value  = (\d+.\d+)', string)
+    Final_metric_value = float(m1.group(1))
+    file1.close()
+    # get denoise (with feaure-- multimodal?) 180 rotation registration
+    result_image_180, result_transform_parameters_180 = itk.elastix_registration_method(fixed_image=fixed_image_feature,
+                                                                                        moving_image=moving_image_feature_180,
+                                                                                        parameter_object=parameter_object,
+                                                                                        log_to_console=True,
+                                                                                        log_to_file=True,
+                                                                                        output_directory=localsubjectpath)  # '/Users/kaleb/Documents/CSHL/2d_3D_linear_reg/')
+    file2 = open(localsubjectpath + "elastix.log", "r")
+    string = file2.read()
+    m2 = re.search('Final metric value  = (\d+.\d+)', string)
+    Final_metric_value_180 = float(m2.group(1))
+    file2.close()
+    # if 180 rotaoin better:
+    if Final_metric_value_180 > Final_metric_value:  # for AdvancedKappaStatistic higher value is better (1.0 = prefect)
+        result_image_good = result_image_180
+        result_transform_parameters_good = result_transform_parameters_180
+        warnings.warn(message="WARNING: 180 degree rotation detected")
+        add_theta = 180
+    else:
+        result_image_good = result_image
+        result_transform_parameters_good = result_transform_parameters
+        add_theta = 0
+    # now get rotation and translations measurements
+    # pm0 = result_transform_parameters_good.GetParameterMap(0)
+    # center = [float(p) for p in pm0['CenterOfRotationPoint']]  # todo take this as center of rotatiion
+    # elx_parameters = [float(p) for p in pm0['TransformParameters']]  # todo take this as translation and degree values?
+    # Y_shift =   #these aare in number of pixels (sould be -150 for test case)
+    # X_shift =   #these aare in number of pixels (shoould be -100 for test case)
+    # elx_angle=  #this  is in radians (should be 5 for test case)
+    # new_angle_rad = elx_angle + math.radians(add_theta) #this  is in radians both 180 or not roation and elastix rotation
+    # shift[0] = Y_shift  #Y direction, axis 0
+    # shift[1] = X_shift  #X direction, axis 1
+    new_angle_rad = math.radians(add_theta)
 
-    parameter_object.SetParameter("SubtractMean", "false")
-
-    # todo note: this works for trnaslation... the issue is ROTATION .....doenst work on only rot or rot + trans
-
-    result_image, result_transform_parameters = itk.elastix_registration_method(
-        fixed_image=fixed_image_feature_rot_trans, moving_image=fixed_image_feature,
-        parameter_object=parameter_object,
-        log_to_console=True, output_directory='/Users/kaleb/Documents/CSHL/2d_3D_linear_reg/')
-
-    euler_transform = itk.Euler2DTransform[itk.D].New()
-
-    pm0 = result_transform_parameters.GetParameterMap(0)
-
-    center = [float(p) for p in pm0['CenterOfRotationPoint']]  # todo take this as center of rotatiion
-    fixed_parameters = itk.OptimizerParameters[itk.D](len(center))
-    for i, p in enumerate(center):
-        fixed_parameters[i] = p
-    euler_transform.SetFixedParameters(fixed_parameters)
-
-    elx_parameters = [float(p) for p in pm0['TransformParameters']]  # todo take this as
-    itk_parameters = itk.OptimizerParameters[itk.D](len(elx_parameters))
-    for i, p in enumerate(elx_parameters):
-        itk_parameters[i] = p
-    euler_transform.SetParameters(itk_parameters)
-
-    dimension = moving_image_denoise.GetImageDimension()
-
-    # When creating the composite transform for itk,
-    # take into account that elastix uses T2(T1(x)) while itk does this the other way around.
-    # So to get the correct composite transform, add the last transform in elastix first in itk.
-    composite_transform = itk.CompositeTransform[itk.D, dimension].New()
-    composite_transform.AddTransform(euler_transform)
-
-    # todo chnage for both input of feautre and denoise for feature binary image use:AdvancedKappaStatistic
-
-    # set parameters by: http://elastix.bigr.nl/wiki/index.php/Par0013
-
-    # define noise parameter map
-    parameter_object_denoise = itk.ParameterObject.New()
-    resolutions = 1
-    parameter_map_rigid = parameter_object_denoise.GetDefaultParameterMap('rigid', resolutions)
-    parameter_object_denoise.AddParameterMap(parameter_map_rigid)
-    parameter_object_denoise.SetParameter("Transform", "EulerTransform")  # this is rigid
-    parameter_object_denoise.SetParameter("Optimizer", "AdaptiveStochasticGradientDescent")
-    parameter_object_denoise.SetParameter("FixedInternalImagePixelType", "float")
-    parameter_object_denoise.SetParameter("MovingInternalImagePixelType", "float")
-    parameter_object_denoise.SetParameter("Resampler", "Full")  # set image sampler to full --> so no downsampling
-    parameter_object_denoise.SetParameter("Registration", "MultiMetricMultiResolutionRegistration")
-    parameter_object_denoise.SetParameter("FixedImagePyramid", "FixedSmoothingImagePyramid")
-    parameter_object_denoise.SetParameter("MovingImagePyramid", "MovingSmoothingImagePyramid")
-    parameter_object_denoise.SetParameter("Metric", "AdvancedNormalizedCorrelation")
-    parameter_object_denoise.SetParameter("NumberOfResolutions", "1")
-
-    parameter_object_denoise.SetParameter("UseDirectionCosines", "False")
-    parameter_object_denoise.SetParameter("AutomaticTransformInitialization", "True")
-    parameter_object_denoise.SetParameter("AutomaticTransformInitializationMethod", "GeometricalCenter")
-    parameter_object_denoise.SetParameter("UseComplement", "False")
-
-    parameter_object_denoise.SetParameter("MaximumNumberOfSamplingAttempts", "1")
-
-    # Load Elastix Image Filter Object
-    elastix_object = itk.ElastixRegistrationMethod.New(fixed_image_denoise, moving_image_denoise,
-                                                       parameter_object=parameter_object_denoise)  # ,out='/Users/kaleb/Documents/CSHL/2d_3D_linear_reg/')
-    # elastix_object.SetFixedImage(fixed_image_spectrum1)
-    elastix_object.AddFixedImage(fixed_image_feature)
-    # elastix_object.SetMovingImage(moving_image_spectrum1)
-    elastix_object.AddMovingImage(moving_image_feature)
-    # define feaure parameter map
-    parameter_object_feature = itk.ParameterObject.New()
-    resolutions = 1
-    parameter_map_rigid = parameter_object_feature.GetDefaultParameterMap('rigid', resolutions)
-    parameter_object_feature.AddParameterMap(parameter_map_rigid)
-    parameter_object_feature.SetParameter("Metric", "AdvancedKappaStatistic")
-    parameter_object_denoise.SetParameter("Transform", "EulerTransform")  # this is rigid
-    parameter_object_denoise.SetParameter("Optimizer", "AdaptiveStochasticGradientDescent")
-    parameter_object_denoise.SetParameter("FixedInternalImagePixelType", "float")
-    parameter_object_denoise.SetParameter("MovingInternalImagePixelType", "float")
-    parameter_object_denoise.SetParameter("Resampler", "Full")  # set image sampler to full --> so no downsampling
-    parameter_object_denoise.SetParameter("Registration", "MultiMetricMultiResolutionRegistration")
-    parameter_object_denoise.SetParameter("FixedImagePyramid", "FixedSmoothingImagePyramid")
-    parameter_object_denoise.SetParameter("MovingImagePyramid", "MovingSmoothingImagePyramid")
-    parameter_object_feature.SetParameter("out", "/Users/kaleb/Documents/CSHL/2d_3D_linear_reg/")
-    parameter_object_feature.SetParameter("NumberOfResolutions", "1")
-    # prefom registration
-    elastix_object.SetParameterObject(parameter_object_feature)
-    # Set additional options
-    elastix_object.SetLogToConsole(True)
-    # Update filter object (required)
-    elastix_object.UpdateLargestPossibleRegion()
-    # Results of Registration
-    result_image = elastix_object.GetOutput()
-    result_transform_parameters = elastix_object.GetTransformParameterObject()
-
-    # covert result_image to array
-    itk.transformread(result_transform_parameters)
-
-    t_params = np.asarray(result_transform_parameters["TransformParameters"]).astype(np.float)
-
-    # get values from transformation matrix
-    # new_angle_rad = result_transform_parameters(????)
-    # shift = result_transform_parameters(????)
-
-    return new_angle_rad, shift
+    return new_angle_rad
 
 
-def phase_corr_rotation(destination, source, degree_thres):
+def phase_corr_rotation(destination, source, degree_thres, theta_rad):
     """
-    #http://elastix.bigr.nl/wiki/index.php/Par0013
+    This finds the rotation angle if small
 
-    #maybe use RIDGID registration instead of angle:
-    import itk
+    Input:
+    destination: destination image
+    source: source image
+    degree_thres: degree theshold for warning messages
+    theta_rad: amount to intiallly rotate if given
 
-
-    des3d_features32=des3d_denoise.astype(np.float32)
-    des3d_features_rotated32=src3d_denoise.astype(np.float32)
-    fixed_image= itk.image_from_array(des3d_features32)
-    moving_image = itk.image_from_array(des3d_features_rotated32)
-    # Import Default Parameter Map
-    parameter_object = itk.ParameterObject.New()
-    default_rigid_parameter_map = parameter_object.GetDefaultParameterMap('rigid')
-    parameter_object.AddParameterMap(default_rigid_parameter_map)
-
-    #use multi image? multi-image In this case the registration cost function is defined as:
-#use BOTH segmentation AND ddenoise images to register slice for segmentation use kappa statistic for denoise use... https://github.com/InsightSoftwareConsortium/ITKElastix/blob/master/examples/ITK_Example02_CustomOrMultipleParameterMaps.ipynb
-
-#or use groupwise?
-https://github.com/InsightSoftwareConsortium/ITKElastix/blob/master/examples/ITK_Example06_GroupwiseRegistration.ipynb
-
-#or input ALL 3D data???
-
-#see: https://github.com/InsightSoftwareConsortium/ITKElastix
-
-#can use this to transform data: esult_image_transformix = itk.transformix_filter(moving_image,result_transform_parameters)
-
-
-    #NumberOfResolutions to 1
-
-    #make sure Optimizer "AdaptiveStochasticGradientDescent" is set to SPA is found from data
-
-    #set ouput path
-
-    #is setting UseDirectionCosines to true correct?
-
-    #set this to true? ShowExactMetricValue
-
-    #reduce this to less then 8: MaximumNumberOfSamplingAttempts
-
-    #set metrix to AdvancedNormalizedCorrelation
-
-    # Call registration function
-    result_image, result_transform_parameters = itk.elastix_registration_method(fixed_image, moving_image,parameter_object=parameter_object,log_to_console=True)
-    # Plot images
-    fig, axs = plt.subplots(1,3, sharey=True, figsize=[30,30])
-    plt.figsize=[100,100]
-    axs[0].imshow(result_image)
-    axs[0].set_title('Result', fontsize=30)
-    axs[1].imshow(fixed_image)
-    axs[1].set_title('Fixed', fontsize=30)
-    axs[2].imshow(moving_image)
-    axs[2].set_title('Moving', fontsize=30)
-    plt.show()
+    Output:
+    new_angle_rad: output angle to rotation in radians
     """
-    # for testing: des3d_features_rotated = skimage.transform.rotate(des3d_features, 150)
-    # for testing: des3d_denoise_rotated = skimage.transform.rotate(des3d_denoise, 150)
+    # rotate source by theta
+    source_theta = skimage.transform.rotate(source, math.degrees(theta_rad))
+
     myconstraints = {
         "scale": [1, 0]  # this is a scale of 1 without and stardev
+        # todo add  degree_thres as a constriant here???
     }
-    result = ird.imreg.similarity(destination, source,
-                                  constraints=myconstraints)  # todo fix this? error from this line: numpy.core._exceptions.MemoryError: Unable to allocate 1.23 GiB for an array with shape (9074, 9066) and data type complex128
+    result = ird.imreg.similarity(destination, source_theta,
+                                  constraints=myconstraints)
     theta = abs(result["angle"])
+
     lst = [0, 180]  # this is list of angles to return closest one to measured valve
     idx = (np.abs(lst - theta)).argmin()
     new_angle_180_0 = lst[idx]
@@ -1469,71 +1455,114 @@ https://github.com/InsightSoftwareConsortium/ITKElastix/blob/master/examples/ITK
     return new_angle_rad
 
 
-"""
-def remodeling_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_feature, count_shiftZ, shiftZ, angleZ,
-                   apply_transform, rigid_2d3d, error_overlap, find_rot, degree_thres, denoise_all, max_Z_proj_affine, seq_dir):
-                   
-    #https://github.com/marsmarcin/Generate-3D-models-from-2D-images
-      
-    #https://github.com/search?q=itk+2d+3d+registration&type=repositories               
-                   
-                   
-    #https://github.com/InsightSoftwareConsortium/ITKTwoProjectionRegistration            
-                   
-                   
-    #ML based? https://github.com/hzxie/Pix2Vox
+def elastix_2D_registration(destination, source, degree_thres, theta_rad):
+    # todo try elastic on failed 2d to 2d registratoin also try optical flow, feature based???? try phase correaltion on raw data? try prewhitten b4 denosie phase correaltion?
+    # _deps/elx-src/Common/OpenCL/ITKimprovements/itkOpenCLContext.cxx(387): itkOpenCL warning.
+    # Warning: in function: Create; Name: OpenCLContext (0x555557873e00)
+    # Details: OpenCLContext::Create(method:4):CL_INVALID_PLATFORM
+    # this gets tranformation parameters: GetTransformParameterMap()
+    # (TransformParameters θ_x , θ_y , θ_z , t_x , t_y , t_z) --> in mm???
 
-    #https://github.com/gift-surg/NiftyMIC
-
-    #https://github.com/elhuhdron/emdrp
-
-    #https://pypi.org/project/neutompy/ this uses : https://www.astra-toolbox.com/docs/algs/BP.html
-
-    #https://itk.org/ITKExamples/src/IO/ImageBase/Creade3DFromSeriesOf2D/Documentation.html
-
-    This registers 2D to 3D along Z axis
-        Args:
-        -	rc3d_feature, des3d_feature: the source and destination feature map, used to register rigid
-        -   src3d_denoise, des3d_denoise: the source and destination deionised data, used to affine
-        -   count_shiftZ: the number of countZ to load from saved array if needed
-        -   shiftZ: saved shifitZ data
-        -   apply_transform: True if run saved transformations, false otherwise
-        -   rigid_2d3d: True if run rigid registration, false otherwise
-
-        Returns:
-        -	src3d_T_feature: source feature file shifted with registration values
-        -   des3d_feature : destination feature file
-        -   ount_shiftZ, shiftZ:  registration shift
-        -   src3d_T: source raw file shifted with registration values
+    return shift, new_angle_rad
 
 
-    https://github.com/InsightSoftwareConsortium/ITKElastix/blob/master/examples/ITK_Example05_PointRegistration.ipynb
-    
-    #maybe take segmentation --> find centroids --> then apply this  to it?  
-    
-    
+def affine_registation(destination, source, degree_thres, theta_rad):
+    # AFFINE REGISTRATION
+    import torch
+    from torch import optim
 
-    #use:  Contour propagation
+    # Create field grid (height x width x 2)
+    grid = registration.create_grid(field.shape)
 
-    #maybe https://github.com/opencv/opencv_contrib/tree/master/modules/sfm
-    
-    #note for this segment is refeering to a 2D slice
-    #https://www.slicer.org/
-    #https://github.com/SlicerRt/SegmentRegistration#segment-registration
-    
-    
-    #https://github.com/SlicerRt/SegmentRegistration#segment-registration
+    # Create torch tensors
+    stack_ = torch.as_tensor(stack, dtype=torch.float32)
+    field_ = torch.as_tensor(field, dtype=torch.float32)
+    grid_ = torch.as_tensor(grid, dtype=torch.float32)
+
+    # Define parameters and optimizer
+    linear = torch.nn.Parameter(torch.eye(3)[:, :2])  # first two columns of rotation matrix
+    translation = torch.nn.Parameter(torch.tensor([rig_x, rig_y, rig_z]))  # translation vector
+    affine_optimizer = optim.Adam([{'params': linear, 'lr': lr_linear},
+                                   {'params': translation, 'lr': lr_translation}])
+
+    # Optimize
+    for i in range(affine_iters):
+        # Zero gradients
+        affine_optimizer.zero_grad()
+
+        # Compute gradients
+        pred_grid = registration.affine_product(grid_, linear, translation)  # w x h x 3
+        pred_field = registration.sample_grid(stack_, pred_grid)
+        corr_loss = -(pred_field * field_).sum() / (torch.norm(pred_field) *
+                                                    torch.norm(field_))
+        print('Corr at iteration {}: {:5.4f}'.format(i, -corr_loss))
+        corr_loss.backward()
+
+        # Update
+        affine_optimizer.step()
+
+    # Save em (originals will be modified during non-rigid registration)
+    affine_linear = linear.detach().clone()
+    affine_translation = translation.detach().clone()
+
+    return
 
 
+def part_in_whole_registration(whole_image, template):
+    """
+    This finds where a given template is located within a given whole image. Works for 2D or 3D images
 
-    return src3d_T, src3d_T_feature, src3d_T_denoise, count_shiftZ, shiftZ, error_allZ
+    Input:
+    whole_image: The whole image
+    template: The template image
 
-"""
+    Output:
+    whole_imaage_template: The whole image thaat corresponds to the template
+    XYZ_temp = the corrdinates of where the template is located within the whole image
+    """
+
+    # https: // scikit - image.org / docs / dev / auto_examples / features_detection / plot_template.html  # sphx-glr-auto-examples-features-detection-plot-template-py
+
+    # get max value center point
+    # ij = np.unravel_index(np.argmax(result), result.shape)
+    # x, y = ij[::-1] #this is center X Y value
+    # htemp, wtemp = template.shape
+    # rect = plt.Rectangle((x, y), wtemp, htemp, edgecolor='r', facecolor='none')
+
+    # Run registration with no rotations
+    px_z = field_z - stack_z + stack.shape[0] / 2 - 0.5
+    mini_stack = stack[max(0, int(round(px_z - rigid_zrange))): int(round(
+        px_z + rigid_zrange))]
+    corrs = np.stack([skimage.feature.match_template(whole_image, template, pad_input=True) for s in
+                      mini_stack])
+    smooth_corrs = scipy.ndimage.gaussian_filter(corrs, 0.7)
+
+    # Get results
+    min_z = max(0, int(round(px_z - rigid_zrange)))
+    min_y = int(round(0.05 * stack.shape[1]))
+    min_x = int(round(0.05 * stack.shape[2]))
+    mini_corrs = smooth_corrs[:, min_y:-min_y, min_x:-min_x]
+    rig_z, rig_y, rig_x = np.unravel_index(np.argmax(mini_corrs), mini_corrs.shape)
+
+    # Rewrite coordinates with respect to original z
+    rig_z = (min_z + rig_z + 0.5) - stack.shape[0] / 2
+    rig_y = (min_y + rig_y + 0.5) - stack.shape[1] / 2
+    rig_x = (min_x + rig_x + 0.5) - stack.shape[2] / 2
+
+    # XYZ_temp =
+
+    # whole_imaage_template =
+
+    return whole_imaage_template, XYZ_temp
+
+
+#todo prewhitten data before phase correatlion?
 
 
 def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_feature, count_shiftZ, shiftZ, angleZ,
                    apply_transform, rigid_2d3d, error_overlap, find_rot, degree_thres, denoise_all, max_Z_proj_affine,
-                   seq_dir, maxZshift_percent):
+                   seq_dir, maxZshift_percent, Z, list_180_Z_rotation, auto_180_Z_rotation, localsubjectpath,
+                   list_manual_Z_crop, Z_reg_denoise_or_feature):
     """
     This registers 2D to 3D along Z axis
         Args:
@@ -1551,26 +1580,88 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
         -   src3d_T: source raw file shifted with registration values
 
     """
-    # nice ppt on optial flow" https://github.com/aplyer/gefolki/blob/master/COREGISTRATION.pdf
+
+    # if list_manual_Z_crop is given then crop image before registration below
+    if np.any(list_manual_Z_crop) is not None:
+        crop_destination = list_manual_Z_crop[Z - 1][:]
+        crop_source = list_manual_Z_crop[Z][:]
+        # crop for source
+        Y_startS = crop_source[0]
+        Y_endS = crop_source[1]
+        X_startS = crop_source[2]
+        X_endS = crop_source[3]
+        # crop for destination
+        Y_startD = crop_destination[0]
+        Y_endD = crop_destination[1]
+        X_startD = crop_destination[2]
+        X_endD = crop_destination[3]
+        if src3d_denoise.ndim == 3:
+            src3d_denoise_crop = src3d_denoise[Y_startS:Y_endS][X_startS:X_endS][:]
+            des3d_denoise_crop = des3d_denoise[Y_startD:Y_endD][X_startD:X_endD][:]
+        if src3d_denoise.ndim == 2:
+            src3d_denoise_crop = src3d_denoise[Y_startS:Y_endS][X_startS:X_endS]
+            des3d_denoise_crop = des3d_denoise[Y_startD:Y_endD][X_startD:X_endD]
+        # pad the Zplane in the X then Y
+        dim = 1
+        [src3d_denoise_crop, des3d_denoise_crop] = func2d3d.zero_pad(src3d_denoise_crop, des3d_denoise_crop, dim)
+        dim = 0
+        [src3d_denoise_crop, des3d_denoise_crop] = func2d3d.zero_pad(src3d_denoise_crop, des3d_denoise_crop, dim)
+        src3d_feature_crop = src3d_feature[Y_startS:Y_endS][X_startS:X_endS]
+        des3d_feature_crop = des3d_feature[Y_startD:Y_endD][X_startD:X_endD]
+        # pad the Zplane in the X then Y
+        dim = 1
+        [src3d_feature_crop, des3d_feature_crop] = func2d3d.zero_pad(src3d_feature_crop, des3d_feature_crop, dim)
+        dim = 0
+        [src3d_feature_crop, des3d_feature_crop] = func2d3d.zero_pad(src3d_feature_crop, des3d_feature_crop, dim)
+        Y_shift_crop = X_startS - X_startD  # X_endS  X_startD  X_endD
+        X_shift_crop = Y_startS - Y_startD  # Y_endS Y_startD Y_endD
+    else:
+        src3d_denoise_crop = src3d_denoise
+        des3d_denoise_crop = des3d_denoise
+        src3d_feature_crop = src3d_feature
+        des3d_feature_crop = des3d_feature
+        Y_shift_crop = 0
+        X_shift_crop = 0
+    # todo nice ppt on optial flow" https://github.com/aplyer/gefolki/blob/master/COREGISTRATION.pdf
     Z_max_shift0 = src3d.shape[0] * (maxZshift_percent / 100)
     Z_max_shift1 = src3d.shape[1] * (maxZshift_percent / 100)
     if denoise_all:
         if max_Z_proj_affine:
-            src3d_denoise_one = np.max(src3d_denoise, axis=2)
-            des3d_denoise_one = np.max(des3d_denoise, axis=2)
+            src3d_denoise_one = np.max(src3d_denoise_crop, axis=2)  # todo change back to max?
+            des3d_denoise_one = np.max(des3d_denoise_crop, axis=2)
         else:
             if seq_dir == 'top':
-                src3d_denoise_one = src3d_denoise[:, :, 0]
-                des3d_denoise_one = des3d_denoise[:, :, -1]
+                src3d_denoise_one = src3d_denoise_crop[:, :, 0]
+                des3d_denoise_one = des3d_denoise_crop[:, :, -1]
             elif seq_dir == 'bottom':
-                src3d_denoise_one = src3d_denoise[:, :, -1]
-                des3d_denoise_one = des3d_denoise[:, :, 0]
+                src3d_denoise_one = src3d_denoise_crop[:, :, -1]
+                des3d_denoise_one = des3d_denoise_crop[:, :, 0]
             else:
                 warnings.warn(message="WARNING:opticalZ_dir variable not defined correctly")
     else:
-        src3d_denoise_one = src3d_denoise
-        des3d_denoise_one = des3d_denoise
+        src3d_denoise_one = src3d_denoise_crop
+        des3d_denoise_one = des3d_denoise_crop
     error_allZ = []
+    if Z_reg_denoise_or_feature == 'denoise':
+        src3d_reg = src3d_denoise_one
+        des3d_reg = des3d_denoise_one
+    elif Z_reg_denoise_or_feature == 'feature':
+        src3d_reg = src3d_feature_crop
+        des3d_reg = des3d_feature_crop
+    if list_180_Z_rotation is not None:
+        if Z in list_180_Z_rotation:
+            # deffine theta as 180 degrees for transformation
+            theta = 180
+            # set auto_180_Z_rotation for this Z to false if true
+            auto_180_Z_rotation = False
+        else:
+            theta = 0
+    else:
+        theta = 0
+    theta_rad = math.radians(theta)
+    if auto_180_Z_rotation:
+        new_angle_rad = auto_detect_180(des3d_reg, src3d_reg, localsubjectpath)
+        theta_rad = new_angle_rad
     if rigid_2d3d:
         if apply_transform:
             error = 0  # not calculated
@@ -1580,13 +1671,16 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
         else:
             # find rotation
             if find_rot:
-                angle_rad = phase_corr_rotation(des3d_denoise_one, src3d_denoise_one,
-                                                degree_thres)  # todo change back to des3d_denoise_one, src3d_denoise_one?
+                angle_rad = phase_corr_rotation(des3d_reg, src3d_reg, degree_thres,
+                                                theta_rad)  # todo change back to des3d_denoise_one, src3d_denoise_one?
             else:
                 angle_rad = 0.0
             # basic phase corr only
-            shift, error, diffphase = skimage.registration.phase_cross_correlation(des3d_denoise_one,
-                                                                                   src3d_denoise_one)  # feature and denosie give similar values
+            shift, error, diffphase = skimage.registration.phase_cross_correlation(des3d_reg,
+                                                                                   src3d_reg)  # feature and denosie give similar values, change back to des3d_denoise_one, src3d_denoise_one?
+            # add shift from crop
+            shift[0] = shift[0] + Y_shift_crop
+            shift[1] = shift[1] + X_shift_crop
             if shift[0] > Z_max_shift1 or shift[1] > Z_max_shift0:
                 warnings.warn(
                     message="WARNING: Z shift exceeded limits, shift X = {} shift y = {}. Seeting Z translation to zero.".format(
@@ -1598,7 +1692,7 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
             angleZ.append(angle_rad)
         error_allZ.append(error)
         # calculate OVERALL SHIFT from inital guess + phase correlations
-        SKI_Trans_all_Z = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=angle_rad,
+        SKI_Trans_all_Z = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=(angle_rad + theta_rad),
                                                                 translation=(shift[1], shift[0]))
         # apply to image in src3d feature map
         src3d_T_feature = skimage.transform.warp(src3d_feature, SKI_Trans_all_Z._inv_matrix, order=0, mode='edge',
@@ -1639,15 +1733,18 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
         else:
             # find rotation
             if find_rot:
-                angle_rad = phase_corr_rotation(des3d_denoise_one, src3d_denoise_one,
-                                                degree_thres)  # todo change back to des3d_denoise_one, src3d_denoise_one?
+                angle_rad = phase_corr_rotation(des3d_reg, src3d_reg, degree_thres, theta_rad)
             else:
                 angle_rad = 0.0
-            rotation_trans = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=angle_rad,
+            rotation_trans = skimage.transform.SimilarityTransform(matrix=None, scale=1,
+                                                                   rotation=(angle_rad + theta_rad),
                                                                    translation=(0, 0))
             # phase correlation here --> then motion based
-            shift, error, diffphase = skimage.registration.phase_cross_correlation(des3d_denoise_one,
-                                                                                   src3d_denoise_one)  # feature and denosie give similar values
+            shift, error, diffphase = skimage.registration.phase_cross_correlation(des3d_reg,
+                                                                                   src3d_reg)  # feature and denosie give similar values, change back to des3d_denoise_one, src3d_denoise_one?
+            # add shift from crop
+            shift[0] = shift[0] + Y_shift_crop
+            shift[1] = shift[1] + X_shift_crop
             if shift[0] > Z_max_shift1 or shift[1] > Z_max_shift0:
                 warnings.warn(
                     message="WARNING: Z shift exceeded limits, shift X = {} shift y = {}. Seeting Z translation to zero.".format(
@@ -1656,18 +1753,18 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
                 shift[1] = 0
             print('Z Phase translation is {}'.format(shift))
             # calculate OVERALL SHIFT from inital guess + phase correlations
-            Tran_Z_phase = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=angle_rad,
+            Tran_Z_phase = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=(angle_rad + theta_rad),
                                                                  translation=(shift[1], shift[0]))
             # apply to image in src3d_denoise to use to calculate V and U
-            src3d_denoise_phase_shift = skimage.transform.warp(src3d_denoise_one, Tran_Z_phase._inv_matrix, order=0,
+            src3d_denoise_phase_shift = skimage.transform.warp(src3d_reg, Tran_Z_phase._inv_matrix, order=0,
                                                                mode='edge', preserve_range=True)
-            src3d_denoise_phase_shift = src3d_denoise_phase_shift.astype(src3d_denoise_one.dtype)
-            v, u = skimage.registration.optical_flow_tvl1(des3d_denoise_one, src3d_denoise_phase_shift)
+            src3d_denoise_phase_shift = src3d_denoise_phase_shift.astype(src3d_reg.dtype)
+            v, u = skimage.registration.optical_flow_tvl1(des3d_reg, src3d_denoise_phase_shift)
             # add phase and motion correction together
             v_shift = v + shift[1]
             u_shift = u + shift[0]
             shiftZ.append([v_shift, u_shift])
-            angleZ.append(angle_rad)
+            angleZ.append((angle_rad + theta_rad))
         error_allZ.append([error])
         # --- Use the estimated optical flow for registration
         nr, nc = src3d_feature.shape
@@ -1732,6 +1829,66 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
 
 
 """
+def remodeling_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_feature, count_shiftZ, shiftZ, angleZ,
+                   apply_transform, rigid_2d3d, error_overlap, find_rot, degree_thres, denoise_all, max_Z_proj_affine, seq_dir):
+                   
+    #https://github.com/marsmarcin/Generate-3D-models-from-2D-images
+      
+    #https://github.com/search?q=itk+2d+3d+registration&type=repositories               
+                   
+                   
+    #https://github.com/InsightSoftwareConsortium/ITKTwoProjectionRegistration            
+                   
+                   
+    #ML based? https://github.com/hzxie/Pix2Vox
+
+    #https://github.com/gift-surg/NiftyMIC
+
+    #https://github.com/elhuhdron/emdrp
+
+    #https://pypi.org/project/neutompy/ this uses : https://www.astra-toolbox.com/docs/algs/BP.html
+
+    #https://itk.org/ITKExamples/src/IO/ImageBase/Creade3DFromSeriesOf2D/Documentation.html
+
+    This registers 2D to 3D along Z axis
+        Args:
+        -	rc3d_feature, des3d_feature: the source and destination feature map, used to register rigid
+        -   src3d_denoise, des3d_denoise: the source and destination deionised data, used to affine
+        -   count_shiftZ: the number of countZ to load from saved array if needed
+        -   shiftZ: saved shifitZ data
+        -   apply_transform: True if run saved transformations, false otherwise
+        -   rigid_2d3d: True if run rigid registration, false otherwise
+
+        Returns:
+        -	src3d_T_feature: source feature file shifted with registration values
+        -   des3d_feature : destination feature file
+        -   ount_shiftZ, shiftZ:  registration shift
+        -   src3d_T: source raw file shifted with registration values
+
+
+    https://github.com/InsightSoftwareConsortium/ITKElastix/blob/master/examples/ITK_Example05_PointRegistration.ipynb
+    
+    #maybe take segmentation --> find centroids --> then apply this  to it?  
+    
+    
+
+    #use:  Contour propagation
+
+    #maybe https://github.com/opencv/opencv_contrib/tree/master/modules/sfm
+    
+    #note for this segment is refeering to a 2D slice
+    #https://www.slicer.org/
+    #https://github.com/SlicerRt/SegmentRegistration#segment-registration
+    
+    
+    #https://github.com/SlicerRt/SegmentRegistration#segment-registration
+
+
+
+    return src3d_T, src3d_T_feature, src3d_T_denoise, count_shiftZ, shiftZ, error_allZ
+
+
+
 
     #run rolling ball to remove uneven background intensity #https://scikit-image.org/docs/dev/auto_examples/segmentation/plot_rolling_ball.html#sphx-glr-auto-examples-segmentation-plot-rolling-ball-py
     #convert image to float for calculations below?
