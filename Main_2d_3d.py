@@ -155,8 +155,8 @@ def parse_args(add_help=True):
     parser.add_argument("--auto_180_Z_rotation", default=True, type=str2bool,
                         help="This automatically searches for 180 degree rotations in images by running Z plane to Z plane registration twice and using best restult to ID if 180 rotation or not, if list_180_Z_rotation is set this values are used instead of automatically calculated values (ex:--auto_180_Z_rotation=True)(default:False)")
 
-    parser.add_argument("--Z_reg_denoise_or_feature", default='denoise', choices=['denoise', 'feature'],
-                        help="This defines what images to use for z plane to Zplane registration. Set to denoise to use denoise data, set to feature to use segmented or feature data (ex:--denoise_or_feature=denoise)(default:denoise)")
+    parser.add_argument("--Z_reg_denoise_or_feature", default='feature', choices=['denoise', 'feature'],
+                        help="This defines what images to use for z plane to Zplane registration. Set to denoise to use denoise data, set to feature to use segmented or feature data (ex:--denoise_or_feature=denoise)(default:feature)")
 
     parser.add_argument("--Z_log_transform", default=False, type=str2bool,
                         help="This applys a log transform after denoising to the Z plane data, use this is data has very low SNR (ex:--Z_log_transform=True)(default:False)")

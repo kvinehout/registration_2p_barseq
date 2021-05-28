@@ -590,7 +590,7 @@ def segmentation(A, checkerboard_size, seg_interations, seg_smooth, localsubject
         # Using the threshold values, we generate the three regions.
         A_seg = np.digitize(A, bins=thresholds)
         A_seg, all_zero_seg = remove_zero_segmntation(A_seg, A, Z)
-        if len(all_zero_seg):  # use 3 classes if zero segmentation exisits
+        if len(all_zero_seg):  # use 3 classes if segmentation with all zeros exists
             thresholds = threshold_multiotsu(A, classes=3)
             A_seg = np.digitize(A, bins=thresholds)
             A_seg, all_zero_seg = remove_zero_segmntation(A_seg, A, Z)
@@ -1443,10 +1443,11 @@ def phase_corr_rotation(destination, source, degree_thres, theta_rad):
         warnings.warn(message="WARNING: 180 degree rotation detected")
     # if outside threshold
     if np.abs((new_angle_180_0 - theta)) > degree_thres:
-        new_angle = new_angle_180_0
+        # if outside threshold set theta to 0, b/c setting to 180 or 0 might lead to false postive if not strong evidance of 180 rotation
+        new_angle = 0
         warnings.warn(
             message="WARNING: Z rotation degree shift larger then {} from {}, angle of {} detected. Setting angle to {}".format(
-                degree_thres, new_angle_180_0, np.abs((new_angle_180_0 - theta)), new_angle_180_0))
+                degree_thres, new_angle_180_0, np.abs((new_angle_180_0 - theta)), new_angle))
     else:
         new_angle = theta
     print('Z Theta is {}'.format(new_angle))
@@ -1462,6 +1463,8 @@ def elastix_2D_registration(destination, source, degree_thres, theta_rad):
     # Details: OpenCLContext::Create(method:4):CL_INVALID_PLATFORM
     # this gets tranformation parameters: GetTransformParameterMap()
     # (TransformParameters θ_x , θ_y , θ_z , t_x , t_y , t_z) --> in mm???
+
+    # todo have option here for non-lineaar if distorasion between 2P and Zslices --> run non-linear aafter linear intalizaion
 
     return shift, new_angle_rad
 
@@ -1672,12 +1675,12 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
             # find rotation
             if find_rot:
                 angle_rad = phase_corr_rotation(des3d_reg, src3d_reg, degree_thres,
-                                                theta_rad)  # todo change back to des3d_denoise_one, src3d_denoise_one?
+                                                theta_rad)
             else:
                 angle_rad = 0.0
             # basic phase corr only
             shift, error, diffphase = skimage.registration.phase_cross_correlation(des3d_reg,
-                                                                                   src3d_reg)  # feature and denosie give similar values, change back to des3d_denoise_one, src3d_denoise_one?
+                                                                                   src3d_reg)
             # add shift from crop
             shift[0] = shift[0] + Y_shift_crop
             shift[1] = shift[1] + X_shift_crop
@@ -1741,7 +1744,7 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
                                                                    translation=(0, 0))
             # phase correlation here --> then motion based
             shift, error, diffphase = skimage.registration.phase_cross_correlation(des3d_reg,
-                                                                                   src3d_reg)  # feature and denosie give similar values, change back to des3d_denoise_one, src3d_denoise_one?
+                                                                                   src3d_reg)
             # add shift from crop
             shift[0] = shift[0] + Y_shift_crop
             shift[1] = shift[1] + X_shift_crop
