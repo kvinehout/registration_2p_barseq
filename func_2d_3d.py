@@ -470,7 +470,6 @@ def denoise(A, FFT_max_gaussian, high_thres):
         area_thres = A.shape[1] * (high_thres_dec / 2)
         A = remove_large_obj(A, area_thres, int_thres, FFT_max_gaussian, high_thres_dec)
 
-
     # remove salt and peper with TV norm, wavlet or non-local means
     # calibrate TV norm
     parameter_ranges_tv = {'weight': np.arange(0.1, 0.3, 0.5), 'eps': np.arange(0.0002, 0.001, 0.04),
@@ -1559,13 +1558,99 @@ def part_in_whole_registration(whole_image, template):
     return whole_imaage_template, XYZ_temp
 
 
-#todo prewhitten data before phase correatlion?
+# todo prewhitten data before phase correatlion?
+
+
+def crop_Z(image, list_manual_Z_crop, Z, extra_figs, localsubjectpath):
+    """
+    This crops a given image with defined y_start, y_end, x_start, x_end values. These are read in from list_manual_Z_crop.Can only crop along X and Y
+        Args:
+        -	image: the image to apply cropping to this can be 2D or 3D
+        -   list_manual_Z_crop: the path to the excel file with cropping parameters for a given Z
+        -   Z: Z value to search for given cropping parameters
+        -   extra_figs: this is true to make figures, false to not make figures
+        - localsubjectpath: this is the path loction to save figures
+
+        Returns:
+        -	image_crop: this is the cropped image. After cropping image is zero padded. this will match 2d or 3D deimensiions in image
+    """
+    # if list_manual_Z_crop is given then crop image before registration below
+    if np.any(list_manual_Z_crop) is not None:
+        # load data
+        npcsv = np.genfromtxt(list_manual_Z_crop, delimiter=',', encoding='utf8', dtype=np.str)
+        # get Z values --> find Z in first row somewhere  --> add .lower to can look at captial or not
+        namaes = np.char.lower(npcsv[0])  # names is first row
+        values = np.zeros([npcsv.shape[0] - 1, npcsv.shape[1]])
+        for i in range(1, npcsv.shape[0]):
+            vi = i - 1
+            values[vi][:] = list(map(int, npcsv[i]))
+        # find row with Z, 'Y_start', 'Y_end', 'X_start', 'X_end'
+        zstr = 'z'
+        Zrow = np.flatnonzero(np.core.defchararray.find(namaes, zstr) != -1)
+        if Zrow.size <= 0:
+            warnings.warn(message="WARNING:No Z colum found in list_manual_Z_crop csv file")
+        YSstr = 'y_start'
+        y_start_row = np.flatnonzero(np.core.defchararray.find(namaes, YSstr) != -1)
+        if y_start_row.size <= 0:
+            warnings.warn(message="WARNING:No y_start colum found in list_manual_Z_crop csv file")
+        YEstr = 'y_end'
+        y_end_row = np.flatnonzero(np.core.defchararray.find(namaes, YEstr) != -1)
+        if y_end_row.size <= 0:
+            warnings.warn(message="WARNING:No y_end colum found in list_manual_Z_crop csv file")
+        XSstr = 'x_start'
+        x_start_row = np.flatnonzero(np.core.defchararray.find(namaes, XSstr) != -1)
+        if x_start_row.size <= 0:
+            warnings.warn(message="WARNING:No x_start colum found in list_manual_Z_crop csv file")
+        XEstr = 'x_end'
+        x_end_row = np.flatnonzero(np.core.defchararray.find(namaes, XEstr) != -1)
+        if x_end_row.size <= 0:
+            warnings.warn(message="WARNING:No x_end colum found in list_manual_Z_crop csv file")
+        Z_values = values[:, Zrow[0]]
+        XS_values = values[:, x_start_row[0]]
+        XE_values = values[:, x_end_row[0]]
+        YS_values = values[:, y_start_row[0]]
+        YE_values = values[:, y_end_row[0]]
+        # check if Z  are in list
+        if np.any(Z == Z_values):
+            src_Z_index = np.where(Z_values == Z)
+            Y_startS = YS_values[src_Z_index]
+            Y_endS = YE_values[src_Z_index]
+            X_startS = XS_values[src_Z_index]
+            X_endS = XE_values[src_Z_index]
+        else:  # no crop in  image
+            Y_startS = 0
+            Y_endS = image.shape[0] - 1
+            X_startS = 0
+            X_endS = image.shape[1] - 1
+        if image.ndim == 3:
+            for i in range(image.shape[2]):
+                image_crop_one = image[Y_startS:Y_endS, X_startS:X_endS, i]
+                image_crop_one = np.expand_dims(image_crop_one, axis=-1)
+                if i != 0:
+                    image_crop = np.concatenate((image_crop, image_crop_one), axis=2)
+                else:
+                    image_crop = image_crop_one
+        if image.ndim == 2:
+            image_crop = image[Y_startS:Y_endS, X_startS:X_endS]
+        # pad cropped image with zeros until size of image
+        dim = 1
+        [image, image_crop] = zero_pad(image, image_crop, dim)
+        dim = 0
+        [image, image_crop] = zero_pad(image, image_crop, dim)
+        if extra_figs:
+            plt.figure()
+            plt.imshow(image_crop)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
+            plt.savefig(localsubjectpath + 'Z=' + str(Z) + '_cropped_image.png', format='png')
+            plt.close()
+    else:
+        image_crop = image
+    return image_crop
 
 
 def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_feature, count_shiftZ, shiftZ, angleZ,
                    apply_transform, rigid_2d3d, error_overlap, find_rot, degree_thres, denoise_all, max_Z_proj_affine,
                    seq_dir, maxZshift_percent, Z, list_180_Z_rotation, auto_180_Z_rotation, localsubjectpath,
-                   list_manual_Z_crop, Z_reg_denoise_or_feature):
+                   Z_reg_denoise_or_feature):
     """
     This registers 2D to 3D along Z axis
         Args:
@@ -1584,47 +1669,13 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
 
     """
 
-    # if list_manual_Z_crop is given then crop image before registration below
-    if np.any(list_manual_Z_crop) is not None:
-        crop_destination = list_manual_Z_crop[Z - 1][:]
-        crop_source = list_manual_Z_crop[Z][:]
-        # crop for source
-        Y_startS = crop_source[0]
-        Y_endS = crop_source[1]
-        X_startS = crop_source[2]
-        X_endS = crop_source[3]
-        # crop for destination
-        Y_startD = crop_destination[0]
-        Y_endD = crop_destination[1]
-        X_startD = crop_destination[2]
-        X_endD = crop_destination[3]
-        if src3d_denoise.ndim == 3:
-            src3d_denoise_crop = src3d_denoise[Y_startS:Y_endS][X_startS:X_endS][:]
-            des3d_denoise_crop = des3d_denoise[Y_startD:Y_endD][X_startD:X_endD][:]
-        if src3d_denoise.ndim == 2:
-            src3d_denoise_crop = src3d_denoise[Y_startS:Y_endS][X_startS:X_endS]
-            des3d_denoise_crop = des3d_denoise[Y_startD:Y_endD][X_startD:X_endD]
-        # pad the Zplane in the X then Y
-        dim = 1
-        [src3d_denoise_crop, des3d_denoise_crop] = func2d3d.zero_pad(src3d_denoise_crop, des3d_denoise_crop, dim)
-        dim = 0
-        [src3d_denoise_crop, des3d_denoise_crop] = func2d3d.zero_pad(src3d_denoise_crop, des3d_denoise_crop, dim)
-        src3d_feature_crop = src3d_feature[Y_startS:Y_endS][X_startS:X_endS]
-        des3d_feature_crop = des3d_feature[Y_startD:Y_endD][X_startD:X_endD]
-        # pad the Zplane in the X then Y
-        dim = 1
-        [src3d_feature_crop, des3d_feature_crop] = func2d3d.zero_pad(src3d_feature_crop, des3d_feature_crop, dim)
-        dim = 0
-        [src3d_feature_crop, des3d_feature_crop] = func2d3d.zero_pad(src3d_feature_crop, des3d_feature_crop, dim)
-        Y_shift_crop = X_startS - X_startD  # X_endS  X_startD  X_endD
-        X_shift_crop = Y_startS - Y_startD  # Y_endS Y_startD Y_endD
-    else:
-        src3d_denoise_crop = src3d_denoise
-        des3d_denoise_crop = des3d_denoise
-        src3d_feature_crop = src3d_feature
-        des3d_feature_crop = des3d_feature
-        Y_shift_crop = 0
-        X_shift_crop = 0
+    # todo remove these extra names
+    src3d_denoise_crop = src3d_denoise
+    des3d_denoise_crop = des3d_denoise
+    src3d_feature_crop = src3d_feature
+    des3d_feature_crop = des3d_feature
+    # todo remove these extra names
+
     # todo nice ppt on optial flow" https://github.com/aplyer/gefolki/blob/master/COREGISTRATION.pdf
     Z_max_shift0 = src3d.shape[0] * (maxZshift_percent / 100)
     Z_max_shift1 = src3d.shape[1] * (maxZshift_percent / 100)
@@ -1681,9 +1732,6 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
             # basic phase corr only
             shift, error, diffphase = skimage.registration.phase_cross_correlation(des3d_reg,
                                                                                    src3d_reg)
-            # add shift from crop
-            shift[0] = shift[0] + Y_shift_crop
-            shift[1] = shift[1] + X_shift_crop
             if shift[0] > Z_max_shift1 or shift[1] > Z_max_shift0:
                 warnings.warn(
                     message="WARNING: Z shift exceeded limits, shift X = {} shift y = {}. Seeting Z translation to zero.".format(
@@ -1745,9 +1793,6 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
             # phase correlation here --> then motion based
             shift, error, diffphase = skimage.registration.phase_cross_correlation(des3d_reg,
                                                                                    src3d_reg)
-            # add shift from crop
-            shift[0] = shift[0] + Y_shift_crop
-            shift[1] = shift[1] + X_shift_crop
             if shift[0] > Z_max_shift1 or shift[1] > Z_max_shift0:
                 warnings.warn(
                     message="WARNING: Z shift exceeded limits, shift X = {} shift y = {}. Seeting Z translation to zero.".format(
@@ -1832,6 +1877,89 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
 
 
 """
+
+def crop_Z(image, list_manual_Z_crop, Z):
+    This crops a given image with defined y_start, y_end, x_start, x_end values. These are read in from list_manual_Z_crop
+        Args:
+        -	image: the image to apply cropping to
+        -   list_manual_Z_crop: the path to the excel file with cropping parameters for a given Z
+        -   Z: Z value to search for given cropping parameters
+
+        Returns:
+        -	image_cropped: this is the cropped image. After cropping image is zero padded.
+
+    # if list_manual_Z_crop is given then crop image before registration below
+    if np.any(list_manual_Z_crop) is not None:
+        # load data
+        # list_manual_Z_crop='/Users/kaleb/Documents/CSHL/2d_3D_linear_reg/test_crop.csv'
+        npcsv = np.genfromtxt(list_manual_Z_crop, delimiter=',', encoding='utf8', dtype=np.str)
+        # get Z values --> find Z in first row somewhere  --> add .lower to can look at captial or not
+        namaes = np.char.lower(npcsv[0])  # names is first row
+        values = np.zeros([npcsv.shape[0] - 1, npcsv.shape[1]])
+        for i in range(1, npcsv.shape[0]):
+            vi = i - 1
+            values[vi][:] = list(map(int, npcsv[i]))
+        # find row with Z, 'Y_start', 'Y_end', 'X_start', 'X_end'
+        zstr = 'z'
+        Zrow = np.flatnonzero(np.core.defchararray.find(namaes, zstr) != -1)
+        if Zrow.size <= 0:
+            warnings.warn(message="WARNING:No Z colum found in list_manual_Z_crop csv file")
+        YSstr = 'y_start'
+        y_start_row = np.flatnonzero(np.core.defchararray.find(namaes, YSstr) != -1)
+        if y_start_row.size <= 0:
+            warnings.warn(message="WARNING:No y_start colum found in list_manual_Z_crop csv file")
+        YEstr = 'y_end'
+        y_end_row = np.flatnonzero(np.core.defchararray.find(namaes, YEstr) != -1)
+        if y_end_row.size <= 0:
+            warnings.warn(message="WARNING:No y_end colum found in list_manual_Z_crop csv file")
+        XSstr = 'x_start'
+        x_start_row = np.flatnonzero(np.core.defchararray.find(namaes, XSstr) != -1)
+        if x_start_row.size <= 0:
+            warnings.warn(message="WARNING:No x_start colum found in list_manual_Z_crop csv file")
+        XEstr = 'x_end'
+        x_end_row = np.flatnonzero(np.core.defchararray.find(namaes, XEstr) != -1)
+        if x_end_row.size <= 0:
+            warnings.warn(message="WARNING:No x_end colum found in list_manual_Z_crop csv file")
+        Z_values = values[:, Zrow[0]]
+        XS_values = values[:, x_start_row[0]]
+        XE_values = values[:, x_end_row[0]]
+        YS_values = values[:, y_start_row[0]]
+        YE_values = values[:, y_end_row[0]]
+        # check if Z  are in list
+        if  np.any(Z == Z_values):
+            src_Z_index = np.where(Z_values == Z)
+            Y_startS = YS_values[src_Z_index]
+            Y_endS = YE_values[src_Z_index]
+            X_startS = XS_values[src_Z_index]
+            X_endS = XE_values[src_Z_index]
+        else: #no crop in  image
+            Y_startS = 0
+            Y_endS = image.shape[0] -1
+            X_startS = 0
+            X_endS = image.shape[1] -1
+
+        if image.ndim == 3:
+            #todo fix this line of code
+            image_crop = image[Y_startS:Y_endS][X_startS:X_endS][:]
+        if image.ndim == 2:
+            image_crop = image[Y_startS:Y_endS][X_startS:X_endS]
+        # pad the Zplane in the X then Y
+        dim = 1
+        [src3d_denoise_crop, des3d_denoise_crop] = func2d3d.zero_pad(src3d_denoise_crop, des3d_denoise_crop, dim)
+        dim = 0
+        [src3d_denoise_crop, des3d_denoise_crop] = func2d3d.zero_pad(src3d_denoise_crop, des3d_denoise_crop, dim)
+        src3d_feature_crop = src3d_feature[Y_startS:Y_endS][X_startS:X_endS]
+        des3d_feature_crop = des3d_feature[Y_startD:Y_endD][X_startD:X_endD]
+        # pad the Zplane in the X then Y
+        dim = 1
+        [src3d_feature_crop, des3d_feature_crop] = func2d3d.zero_pad(src3d_feature_crop, des3d_feature_crop, dim)
+        dim = 0
+        [src3d_feature_crop, des3d_feature_crop] = func2d3d.zero_pad(src3d_feature_crop, des3d_feature_crop, dim)
+        Y_shift_crop = X_startS - X_startD  # X_endS  X_startD  X_endD
+        X_shift_crop = Y_startS - Y_startD  # Y_endS Y_startD Y_endD
+    else:
+        image_cropped = image
+    return image_cropped
 def remodeling_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_feature, count_shiftZ, shiftZ, angleZ,
                    apply_transform, rigid_2d3d, error_overlap, find_rot, degree_thres, denoise_all, max_Z_proj_affine, seq_dir):
                    

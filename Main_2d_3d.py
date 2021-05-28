@@ -59,6 +59,7 @@ import warnings
 import argparse
 import re
 import func_2d_3d as func2d3d
+
 # reload module
 # import importlib
 # importlib.reload(func2d3d)
@@ -149,8 +150,8 @@ def parse_args(add_help=True):
     parser.add_argument("--list_180_Z_rotation", default=None, type=int, nargs='+',
                         help="This applys a 180 degree rotation to the provided Z planes, note Z value is defined as the total Z if multiple folder paths are given. If provided this value is given preferance to values calculated with auto_180_Z_rotation to rottae Z =0, Z=5 and Z=20 by 180 degrees see example (ex:--list_180_Z_rotation 0 5 20)(default:None})")
 
-    parser.add_argument("--list_manual_Z_crop", default=None, type=int, nargs='+',
-                        help="This gives the cropping image parameters for each Z plane, this helps Z plane to Z plane registration but requires aprioi information we need to provide X start, X end, Y start, Y end (ex:--list_manual_Z_crop 0 5 20)(default:None})")
+    parser.add_argument("--list_manual_Z_crop", default=None, type=str,
+                        help="This gives the cropping image parameters for each Z plane, this helps Z plane to Z plane registration but requires aprioi information we need to provide an excell file with ROWS titled: 'Z', 'X_start', 'X_end', 'Y_start',	'Y_end'. These are for the Z plane to crop, the pixels index in the X to start including, the pixels index in the X to stop including, the pixesl index in the Y to include and the pixels index in the Y to stop including respectivly.WARNIING only .csv UTF-8 files work. (ex:--list_manual_Z_crop '/Users/kaleb/Documents/CSHL/2d_3D_linear_reg/crop_file.csv')(default:None})")
 
     parser.add_argument("--auto_180_Z_rotation", default=True, type=str2bool,
                         help="This automatically searches for 180 degree rotations in images by running Z plane to Z plane registration twice and using best restult to ID if 180 rotation or not, if list_180_Z_rotation is set this values are used instead of automatically calculated values (ex:--auto_180_Z_rotation=True)(default:False)")
@@ -414,7 +415,7 @@ def main(args):
                                 plt.imshow(np.max(srcY_T_re_denoise,
                                                   axis=2))  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                             else:
-                                plt.imshow(srcY_T_re_denoise)  #, norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
+                                plt.imshow(srcY_T_re_denoise)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                             name = 'X={}_Y={}_Z={}'.format(X, Y, Z)
                             plt.savefig(args.localsubjectpath + name + '_denoised.png', format='png')
                             plt.close()
@@ -436,9 +437,9 @@ def main(args):
                                 plt.figure()
                                 if args.denoise_all:
                                     plt.imshow(np.max(Y_img_denoise),
-                                               axis=2)  #, norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
+                                               axis=2)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                                 else:
-                                    plt.imshow(Y_img_denoise)  #, norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
+                                    plt.imshow(Y_img_denoise)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                                 name = 'X={}_Y={}_Z={}'.format(X, Y, Z)
                                 plt.savefig(args.localsubjectpath + name + 'Y_img_denoise.png', format='png')
                                 plt.close()
@@ -465,9 +466,9 @@ def main(args):
                             plt.figure()
                             if args.denoise_all:
                                 plt.imshow(
-                                    np.max(Yline_denoise, axis=2))  #, norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
+                                    np.max(Yline_denoise, axis=2))  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                             else:
-                                plt.imshow(Yline_denoise)  #, norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
+                                plt.imshow(Yline_denoise)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                             name = 'X={}_Y={}_Z={}'.format(X, Y, Z)
                             plt.savefig(args.localsubjectpath + name + 'Yline_denoise.png', format='png')
                             plt.close()
@@ -540,9 +541,9 @@ def main(args):
                         plt.figure()
                         if args.denoise_all:
                             plt.imshow(
-                                np.max(srcZ_T_re_denoise, axis=2))  #, norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
+                                np.max(srcZ_T_re_denoise, axis=2))  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                         else:
-                            plt.imshow(srcZ_T_re_denoise)  #, norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
+                            plt.imshow(srcZ_T_re_denoise)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                         name = 'X={}_Y={}_Z={}'.format(X, Y, Z)
                         plt.savefig(args.localsubjectpath + name + 'srcZ_T_re_denoise.png', format='png')
                         plt.close()
@@ -584,9 +585,9 @@ def main(args):
                         plt.figure()
                         if args.denoise_all:
                             plt.imshow(
-                                np.max(Z_img_denoise, axis=2))  #, norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
+                                np.max(Z_img_denoise, axis=2))  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                         else:
-                            plt.imshow(Z_img_denoise)  #, norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
+                            plt.imshow(Z_img_denoise)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                         name = 'X={}_Y={}_Z={}'.format(X, Y, Z)
                         plt.savefig(args.localsubjectpath + name + 'Z_img_denoise.png', format='png')
                         plt.close()
@@ -598,14 +599,25 @@ def main(args):
             src3d = Zplane  # this is the Y to add to rest
             src3d_denoise = Zplane_denoise  # this is the Y to add to rest
             if Z == 0:
-                # DON'T STITCH Because nothing to stitch
+                # DON'T register Because nothing to register
+                if Zplane_denoise.min() < 0:
+                    Zplane_denoise = des3d_denoise + abs(des3d_denoise.min())
+                Zplane_denoise = np.log1p(Zplane_denoise)
+                # crop image if nessisary
+                if np.any(args.list_manual_Z_crop) is not None:
+                    Zplane_denoise = func2d3d.crop_Z(Zplane_denoise, args.list_manual_Z_crop, Z, args.extra_figs,
+                                                     args.localsubjectpath)
+                Zplane_old_feature = func2d3d.segmentation(Zplane_denoise, args.checkerboard_size, args.seg_interations,
+                                                           args.seg_smooth, args.localsubjectpath, Z, args.segment_otsu,
+                                                           args.extra_figs)
                 Zplane_old = Zplane
                 Zplane_old_denoise = Zplane_denoise
                 del Zplane, Yline_old, Zplane_denoise, Yline_old_denoise
             else:
                 print("Registration of  Z = {} and Z= {}.".format(Z, (Z - 1)))
                 des3d = Zplane_old  # define destination image
-                des3d_denoise = Zplane_old_denoise  # define destination image
+                des3d_denoise = Zplane_old_denoise  # define destination image denoised
+                des3d_feature = Zplane_old_feature  # define destination image feature
                 # zero pad
                 dim = 0
                 [src3d, des3d] = func2d3d.zero_pad(src3d, des3d, dim)
@@ -617,22 +629,30 @@ def main(args):
                 # shift data so no negative values
                 if src3d_denoise.min() < 0:
                     src3d_denoise = src3d_denoise + abs(src3d_denoise.min())
-                if des3d_denoise.min() < 0:
-                    des3d_denoise = des3d_denoise + abs(des3d_denoise.min())
+                # if des3d_denoise.min() < 0:
+                #    des3d_denoise = des3d_denoise + abs(des3d_denoise.min()) #DO NOT NEED B/C done in last round and in z=0
                 # log transfrom data
                 if args.Z_log_transform:
                     src3d_denoise = np.log1p(src3d_denoise)
-                    des3d_denoise = np.log1p(des3d_denoise)
+                #   des3d_denoise = np.log1p(des3d_denoise)  #DO NOT NEED B/C done in last round and in z=0
+                # crop image if nessisary
+                if np.any(args.list_manual_Z_crop) is not None:
+                    src3d_denoise = func2d3d.crop_Z(src3d_denoise, args.list_manual_Z_crop, Z, args.extra_figs,
+                                                    args.localsubjectpath)
+                    # dont need on des3d_denoise b/x z=0 done with b4 and old image carried over to next Z iteration
+
                 # get feature map for each optical slice with segmentation
                 src3d_feature = func2d3d.segmentation(src3d_denoise, args.checkerboard_size, args.seg_interations,
                                                       args.seg_smooth, args.localsubjectpath, Z, args.segment_otsu,
                                                       args.extra_figs)
-
-                Zold = Z - 1  # define old Z for naming
-                des3d_feature = func2d3d.segmentation(des3d_denoise, args.checkerboard_size, args.seg_interations,
-                                                      args.seg_smooth, args.localsubjectpath, Zold, args.segment_otsu,
-                                                      args.extra_figs)
-
+                # we dont need line below b/c we  carry this over to next iteration and add on Z=0
+                # Zold = Z - 1  # define old Z for naming not needed b/c all calculation done on Z then carried over to next iteration
+                # des3d_feature = func2d3d.segmentation(des3d_denoise, args.checkerboard_size, args.seg_interations, args.seg_smooth, args.localsubjectpath, Zold, args.segment_otsu, args.extra_figs)
+                # zero pad b/c des3d_feature from before zero pad on this iteration
+                dim = 0
+                [src3d_feature, des3d_feature] = func2d3d.zero_pad(src3d_feature, des3d_feature, dim)
+                dim = 1
+                [src3d_feature, des3d_feature] = func2d3d.zero_pad(src3d_feature, des3d_feature, dim)
                 # preform Z registration
                 src3d_T, src3d_T_feature, src3d_T_denoise, count_shiftZ, shiftZ, error_allZ = func2d3d.registration_Z(
                     src3d, src3d_denoise,
@@ -641,8 +661,7 @@ def main(args):
                     shiftZ, angleZ, args.apply_transform,
                     args.rigid_2d3d, args.error_overlap, args.find_rot, args.degree_thres, args.denoise_all,
                     args.max_Z_proj_affine, args.seq_dir, args.maxZshift_percent, Z, args.list_180_Z_rotation,
-                    args.auto_180_Z_rotation, args.localsubjectpath, args.list_manual_Z_crop,
-                    args.Z_reg_denoise_or_feature)
+                    args.auto_180_Z_rotation, args.localsubjectpath, args.Z_reg_denoise_or_feature)
                 if args.extra_figs:
                     # make plots of Z plane
                     plt.figure()
@@ -678,7 +697,7 @@ def main(args):
                     # expand dimentions of ndim = 2 data
                     src3d_T_feature = np.expand_dims(src3d_T_feature, axis=-1)
                     des3d_feature = np.expand_dims(des3d_feature, axis=-1)
-                    #this is done if denoise_all is not selected then ndim==2
+                    # this is done if denoise_all is not selected then ndim==2
                     if des3d_denoise.ndim == 2:
                         des3d_denoise = np.expand_dims(des3d_denoise, axis=-1)
                     if src3d_T_denoise.ndim == 2:
@@ -693,7 +712,7 @@ def main(args):
                         d3_img_feature = np.concatenate((des3d_feature, src3d_T_feature), axis=2)
                     else:
                         warnings.warn("WARNING: seq_dir variable not defined properly: Use 'top' or 'bottom'")
-                    del des3d, src3d_T_feature, des3d_feature
+                    del des3d
                 else:
                     # pad the 3D image in the Y
                     # pad in the Y
@@ -726,17 +745,17 @@ def main(args):
                         d3_img_feature = np.concatenate((d3_array_feature, src3d_T_feature), axis=2)
                     else:
                         warnings.warn("WARNING: seq_dir variable not defined properly: Use 'top' or 'bottom'")
-                    del src3d_T_feature
                 d3_array = d3_img  # Z_img[int(abs(target_overlapY + shift[0])):, :]  # this removes Zeros that are due to shift
                 d3_array_denoise = d3_img_denoise  # Z_img[int(abs(target_overlapY + shift[0])):, :]  # this removes Zeros that are due to shift
                 d3_array_feature = d3_img_feature
                 # rename the source to be used as destination for next round --> USE SHIFTED source
-                Zplane_old = src3d_T  # Zplane
-                Zplane_old_denoise = src3d_T_denoise  # Zplane_denoise
-                del Zplane, Zplane_denoise, d3_img, d3_img_feature, d3_img_denoise, src3d_T, src3d_T_denoise
+                Zplane_old = src3d_T
+                Zplane_old_denoise = src3d_T_denoise
+                Zplane_old_feature = src3d_T_feature
+                del Zplane, Zplane_denoise, d3_img, d3_img_feature, d3_img_denoise, src3d_T, src3d_T_denoise, des3d_feature, src3d_T_feature
             count_Z_folder = count_Z_folder + 1
     # DO THIS AFTER ALL folders
-    del Zplane_old
+    del Zplane_old, Zplane_old_feature, Zplane_old_denoise
     # print out error and shift to terminal
     print("Error in the X direction. {}".format(error_allX))
     print("Error in the Y direction. {}".format(error_allY))
