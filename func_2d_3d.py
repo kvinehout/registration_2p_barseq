@@ -217,7 +217,7 @@ def remove_large_obj(A, area_thres, int_thres, FFT_max_gaussian, high_thres_dec)
     image_label_overlay = label2rgb(label_image, image=A, bg_label=0)
     for region in regionprops(label_image, intensity_image=A):
         # take regions with large enough areas
-        if region.area >= area_thres ** 2 and region.max_intensity >= int_thres:
+        if region.area >= area_thres ** 2 and region.mean_intensity >= int_thres:  # mean intensity not max intensity makes more sence here
             warnings.warn(message='Large high intensity artifact found, removing artifact')
             # define this as a mask to REMOVE from image
             # for this box set value to zero? mean? median?
@@ -544,7 +544,7 @@ def store_evolution_in(lst):
 
 
 def remove_zero_segmntation(A_seg, A, Z):
-    """Find is one segmented image has all zeros, if so then replace
+    """Find if one segmented image has all zeros, if so then replace
     """
     # find if one segmentation has all zeros, if so then replace zero segmentation with lowest segmenation
     seg_values_max = np.ones(A_seg.max() + 1)
@@ -1297,12 +1297,6 @@ def zca_whitening_matrix(X):
     ZCAMatrix = np.dot(U, np.dot(np.diag(1.0 / np.sqrt(S + epsilon)), U.T))  # [M x M]
     return ZCAMatrix
 
-
-# TRY 180 degrees:
-# des3d_denoise_rotated = skimage.transform.rotate(des3d_denoise, 5)
-
-# TODO make the function below:
-
 def auto_detect_180(destination_feature, source_feature, localsubjectpath):
     """
     This finds if 180 is found or not. This uses elastix.
@@ -1455,7 +1449,7 @@ def phase_corr_rotation(destination, source, degree_thres, theta_rad):
     return new_angle_rad
 
 
-def elastix_2D_registration(destination, source, degree_thres, theta_rad):
+def elastix_2D_registration(destination, source, degree_thres, theta_rad, nonlinear_trans):
     # todo try elastic on failed 2d to 2d registratoin also try optical flow, feature based???? try phase correaltion on raw data? try prewhitten b4 denosie phase correaltion?
     # _deps/elx-src/Common/OpenCL/ITKimprovements/itkOpenCLContext.cxx(387): itkOpenCL warning.
     # Warning: in function: Create; Name: OpenCLContext (0x555557873e00)
@@ -1464,8 +1458,9 @@ def elastix_2D_registration(destination, source, degree_thres, theta_rad):
     # (TransformParameters θ_x , θ_y , θ_z , t_x , t_y , t_z) --> in mm???
 
     # todo have option here for non-lineaar if distorasion between 2P and Zslices --> run non-linear aafter linear intalizaion
+    if nonlinear_trans:  # if true then linear
 
-    return shift, new_angle_rad
+    return transformation
 
 
 def affine_registation(destination, source, degree_thres, theta_rad):
