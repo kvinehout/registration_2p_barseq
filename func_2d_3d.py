@@ -54,6 +54,10 @@ from sklearn.neighbors import NearestNeighbors
 
 # import ICP
 
+
+# todo add unit tests after each function???
+
+
 # define file load function
 def sshfoldertransfer(server, user, password, remotefilepath, localfilepath, image_type, opticalZ_dir):
     """Connects to host and searches for files matching file_pattern
@@ -184,16 +188,16 @@ def multi_slice_viewer(volume):
 
 def remove_large_obj(A, area_thres, int_thres, FFT_max_gaussian, high_thres_dec):
     """
-        This
-        removes
-        large and high
-        intensity
-        objects
-        from image
-        # area_thres = 10000 or X% of image
-        # int_thres = 10000 or X% greater then median
-        # 21743 is with object adn 1015 is without object
-        # remove large objects (if needed)
+        This removes large and high intensity objects from image
+        Args:
+        -A Numpy array to be searched for large high intensity regions
+        - area_thres: this the square root of the area minimum to look for
+        -int_thres:  this the intensity to look for
+        -FFT_max_gaussian: to filter low frequency out of image
+        -high_thres_dec: the amount to increase boundary by to insure full inclosure of large object
+        Returns:
+        -mask_A: This is the image with the large birght area masked out
+
     """
     ori_A = np.copy(A)
     filt_A = skimage.filters.difference_of_gaussians(A, 1, FFT_max_gaussian)
@@ -255,6 +259,7 @@ def remove_large_obj(A, area_thres, int_thres, FFT_max_gaussian, high_thres_dec)
 
 
 def denoise_noise2self(A, FFT_max_gaussian, high_thres):
+    # https://github.com/NVlabs/noise2noise
     # try noise2noise traiing? https://github.com/czbiohub/noise2self or https://github.com/NVlabs/selfsupervised-denoising
     """
     noisy_image = imarray3D_mean_512
@@ -519,6 +524,7 @@ def denoise(A, FFT_max_gaussian, high_thres):
     # denoised = denoised1 - background
     # replace with difference of gausian?
 
+    #todo change this? or use rolling ball that works better???
     denoised = skimage.filters.difference_of_gaussians(denoised1, 1, FFT_max_gaussian)
 
     # if all values in image are the same value set blank image to zero (should be the case already)
@@ -544,8 +550,9 @@ def store_evolution_in(lst):
 
 
 def remove_zero_segmntation(A_seg, A, Z):
-    """Find if one segmented image has all zeros, if so then replace
+    """Find if one segmented image has all zeros, if so then replace. only do this if NOT segmented into ONLY zero and ones
     """
+    A_seg_ori = np.copy(A_seg)
     # find if one segmentation has all zeros, if so then replace zero segmentation with lowest segmenation
     seg_values_max = np.ones(A_seg.max() + 1)
     seg_values_min = np.ones(A_seg.max() + 1)
@@ -563,7 +570,7 @@ def remove_zero_segmntation(A_seg, A, Z):
         A_seg[np.where(A_seg == count)] = replace_value
         if i > 0:
             warnings.warn(
-                "Warning: Z image {} segmentation detection of multiple segmnataion with zero value, this should not hapen ".format(
+                "Warning: Z image {} segmentation detection of multiple segmentation with zero value, this should not hapen ".format(
                     str(Z)))
     return A_seg, all_zero_seg
 
@@ -576,6 +583,10 @@ def segmentation(A, checkerboard_size, seg_interations, seg_smooth, localsubject
         - seg_interations: number of interations for chan_vese segmentation
         - checkerboard_size:  size of checkerboard for chan_vese segmentatioin
         -seg_smooth: number of smoothing/iterations for chan_vese segmentation
+        -localsubjectpath: this is where to save figures
+        -Z: Current Z value for figure names
+        -segment_otsu ture to run otsu segmentation, false to run chan_vaase segmentation
+        -extra_figs true to create extra figures
         Returns:
         -   A_seg: segmented image
 
@@ -583,16 +594,64 @@ def segmentation(A, checkerboard_size, seg_interations, seg_smooth, localsubject
 
     np.save(localsubjectpath + 'Z=' + str(Z) + '_denoise_for_segmentation', A)
 
+    # do this before segmentaion???
+    # image = cv2.GaussianBlur(image, (5, 5), 0)
+
+    # local otsu? https://scikit-image.org/docs/0.12.x/auto_examples/segmentation/plot_local_otsu.html
+    # issue with local is that most area would just be noise....
+    # img = np.interp(img, (img.min(), img.max()), (0, +255))
+    # img = img.astype(np.uint8)
+    # img = img_as_ubyte(img)
+    # radius = 15
+    # selem = disk(radius)
+    # local_otsu = rank.otsu(img, selem)
+    # A_seg=img >= local_otsu
+    # imshow(img >= local_otsu, cmap=plt.cm.gray)
+    # threshold_global_otsu = threshold_otsu(img)
+    # global_otsu = img >= threshold_global_otsu
+
     if segment_otsu:
         # get threshold values for binary image (b/c only 2 classes)
         thresholds = threshold_multiotsu(A, classes=2)
         # Using the threshold values, we generate the three regions.
-        A_seg = np.digitize(A, bins=thresholds)
-        A_seg, all_zero_seg = remove_zero_segmntation(A_seg, A, Z)
+        A_seg2 = np.digitize(A, bins=thresholds)
+        A_seg2, all_zero_seg = remove_zero_segmntation(A_seg2, A, Z)
+
+        # todo why not make this a for loop that combines all zero groups until increaseing number of classes doesnt give addditional zero group???
+        # todo this is basically trying to find ideal number of clusters????
+        # zero_classes=0
+        # numclass = 3
+        # while zero_classes < 1:
+        # thresholds = threshold_multiotsu(A, classes=numclass) #todo why does this give classes without any data????
+        # A_seg = np.digitize(A, bins=thresholds)
+        # remove empty classes
+        # todo remove empty classes np.histogram(A_seg)
+
+        # if empty classes exits
+        # zero_classes=1
+
+        # numclass = numclass + 1
+        # combine zero segmented into other classes if needed
+        # A_seg3, all_zero_seg = remove_zero_segmntation(A_seg3, A, Z)
+        # set all but highest class value to zero
+        # result = np.where(A_seg3<numclass, 0, A_seg3)
+
         if len(all_zero_seg):  # use 3 classes if segmentation with all zeros exists
             thresholds = threshold_multiotsu(A, classes=3)
-            A_seg = np.digitize(A, bins=thresholds)
-            A_seg, all_zero_seg = remove_zero_segmntation(A_seg, A, Z)
+            A_seg3 = np.digitize(A, bins=thresholds)
+            # make sure len(np.unique(A_seg)) >= 3
+            if len(np.unique(A_seg3)) >= 3:
+                A_seg3, all_zero_seg = remove_zero_segmntation(A_seg3, A, Z)
+                A_seg = A_seg3
+            else:
+                # todo figure this part out???? --> why is this werid??? ddue to remove large object zeros???
+                print('segmentation has only 2 classes with 3 classes set')
+                thresholds = threshold_multiotsu(A, classes=2)
+                # Using the threshold values, we generate the three regions.
+                A_seg2_raw = np.digitize(A, bins=thresholds)
+                A_seg = A_seg2_raw
+        else:
+            A_seg = A_seg2
     else:
         # Initial level set
         init_ls = skimage.segmentation.checkerboard_level_set(A.shape, checkerboard_size)  # default is 5
@@ -649,11 +708,11 @@ def segmentation(A, checkerboard_size, seg_interations, seg_smooth, localsubject
     if extra_figs:
         plt.figure()
         plt.imshow(A)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-        plt.savefig(localsubjectpath + '/Z=' + str(Z) + '_Zplane_raw_plane.png', format='png')
+        plt.savefig(localsubjectpath + '/Z=' + str(Z) + '_Zplane_before_seg.png', format='png')
         plt.close()
         plt.figure()
         plt.imshow(A_seg)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-        plt.savefig(localsubjectpath + '/Z=' + str(Z) + '_Zplane_segmented_plan.png', format='png')
+        plt.savefig(localsubjectpath + '/Z=' + str(Z) + '_Zplane_after_segmented.png', format='png')
         plt.close()
     return A_seg
 
@@ -663,11 +722,13 @@ def feature_CV2(destination_raw, source_raw, diroverlap, FFT_max_gaussian, high_
     # https://scikit-image.org/docs/dev/auto_examples/features_detection/plot_orb.html#sphx-glr-auto-examples-features-detection-plot-orb-py
     """This finds the overlay given A and B with feature based registration
         Args:
-        -	A: 3D set of images to overlap source (moving image)
-        -   B: 3D set of images to overlap target
+        -	source_raw: 3D set of images to overlap source (moving image)
+        -   destination_raw: 3D set of images to overlap target
         -   diroverlap: the direction of overlap, the direction the source image moves --> up, down, left or right
         -  FFT_max_gaussian: used for denoise
         -  high_thres: used for denoise
+        - localsubjectpath: path to save intermediate figures
+        -input_overlap: provided overlap value
 
         Returns:
         -	target_overlap: pixel number of overlay
@@ -764,12 +825,19 @@ def feature_CV2(destination_raw, source_raw, diroverlap, FFT_max_gaussian, high_
     return target_overlap,
 
 
+# todo rework this function? maybe replace with combo of other functions?
+# todo if we move denoise to BEFORE registration for X and Y then only need to segment here if fails for X and Y, although denoise still useful if WITHIN registration (add input for this ???)
+# this is used once in registration within, once in registration X, once in registration Y --> this is used when not in range
+
 def Seg_reg_phase(A, B, FFT_max_gaussian, name, extra_figs, high_thres):
     """
-    This filters source and destination images then segments with ants and registers
+    This denoise and segments data then finds phase correlation of segmented data. This is used if registration is outside of range when first performed.
         Args:
         -	A,B: Numpy array 3D image
         - FFT_max_gausian: this is for removing low frequency sugested value = 10
+        - name: file name to save
+        - extra_figs: This is true to make extra figures
+        - high_thres:
         Returns:
         -	shift_reg: shift of transfrom
         -	error: error of transfrom
@@ -807,7 +875,12 @@ def Seg_reg_phase(A, B, FFT_max_gaussian, name, extra_figs, high_thres):
     maskA = denoise(A, FFT_max_gaussian, high_thres)
     maskB = denoise(B, FFT_max_gaussian, high_thres)
 
-    # shift denoised data
+    # segment data --> issue is chan vase segmnetation fails with little data.... does ostu?
+    # what about log trnasform? and postive value shift?
+    # A_seg=segmentation(A, checkerboard_size, seg_interations, seg_smooth, localsubjectpath, Z, segment_otsu, extra_figs)
+    # A_seg = segmentation(A, checkerboard_size, seg_interations, seg_smooth, localsubjectpath, Z, segment_otsu, extra_figs)
+
+    # shift segmented data
     shift_reg, error, diffphase = skimage.registration.phase_cross_correlation(maskA, maskB)
     print('Filtered diff phase of {}'.format(diffphase))
     Within_Trans = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=0,
@@ -928,12 +1001,15 @@ def zero_pad(A, B, dim):
 
 def registration_within(A, B, FFT_max_gaussian, error_overlap, X, Y, Z, i, localsubjectpath, extra_figs, high_thres):
     """
-    This registers w
+    This registers within a given X Y Z value. THis registered the optical zoom in the confocal imaging
         Args:
         -	A,B: the A and B array to register
         -   FFT_max_gaussian: The fft sigma max to input Seg_reg_phase
         -   error_overlap: The acceptable error limts
         -   X, Y, Z, i: The values of this slice to use for naming and warnings
+        - localsubjectpath: path to save extra files
+        - extra_figs: set to true to save figures
+        - high_thres: this is for denoising if needed used in Seg_reg_phase
 
         Returns:
         -	error : registration error
@@ -978,6 +1054,10 @@ def registration_X(srcY, desY, X_dir, FFT_max_gaussian, error_overlap, X, Y, Z, 
         -   error_overlap: The acceptable error limts
         -   X, Y, Z: The values of this slice to use for naming and warnings
         -  blank_thres: the threhold for ID blank images
+        - localsubjectpath:location to save output figures
+        - extra_figs: Set to true to make additional figures
+        - high_thres: used in feature based ID for denoise
+
         Optional args:
         - target_overlapX: calculated overlap
         - input_overlap: inital guess of overlap
@@ -1111,6 +1191,9 @@ def registration_Y(srcZ, desZ, Y_dir, FFT_max_gaussian, error_overlap, X, Y, Z, 
         -   error_overlap: The acceptable error limts
         -   X, Y, Z: The values of this slice to use for naming and warnings
         -  blank_thres: the threhold for ID blank images
+        - localsubjectpath:location to save output figures
+        - extra_figs: Set to true to make additional figures
+        - high_thres: used in feature based ID for denoise
         Optional args:
         - target_overlapY: calculated overlap
         - input_overlap: input guess of overlap
@@ -1306,9 +1389,8 @@ def auto_detect_180(destination_feature, source_feature, localsubjectpath):
     source_feature: source image
     localsubjectpath: path to save files
 
-
     output:
-    new_angle_rad: angle eaither 180 or 0 if 180 rotation detected
+    new_angle_rad: angle either 180 or 0 if 180 rotation detected
     """
     # rotate image by theta_rad, set to 180 or 0 in Z registration code
     # source_feature = skimage.transform.rotate(source_feature, math.degrees(theta_rad)) #here we want to use segmented image b/c intensity of blood vessesl isnt meaninful
@@ -1412,8 +1494,8 @@ def phase_corr_rotation(destination, source, degree_thres, theta_rad):
     Input:
     destination: destination image
     source: source image
-    degree_thres: degree theshold for warning messages
-    theta_rad: amount to intiallly rotate if given
+    degree_thres: degree threshold for warning messages
+    theta_rad: amount to initially rotate if given
 
     Output:
     new_angle_rad: output angle to rotation in radians
@@ -1449,7 +1531,19 @@ def phase_corr_rotation(destination, source, degree_thres, theta_rad):
     return new_angle_rad
 
 
-def elastix_2D_registration(destination, source, degree_thres, theta_rad, nonlinear_trans):
+def elastix_2D_registration(destination, source, nonlinear_trans):
+    """
+    This fund non-linear (bspline) or linear (similarity) transform between source and destination data. THis uses elastix registtration
+
+    Input:
+    destination: destination image, ideally feature based image
+    source: source image, ideally feature based image
+    nonlinear_trans: This is set to true to find on-linear transformation, false for linear transformation
+
+    Output:
+    transformation: elastix tranfomation matrix
+    """
+
     # todo try elastic on failed 2d to 2d registratoin also try optical flow, feature based???? try phase correaltion on raw data? try prewhitten b4 denosie phase correaltion?
     # _deps/elx-src/Common/OpenCL/ITKimprovements/itkOpenCLContext.cxx(387): itkOpenCL warning.
     # Warning: in function: Create; Name: OpenCLContext (0x555557873e00)
@@ -1457,52 +1551,57 @@ def elastix_2D_registration(destination, source, degree_thres, theta_rad, nonlin
     # this gets tranformation parameters: GetTransformParameterMap()
     # (TransformParameters θ_x , θ_y , θ_z , t_x , t_y , t_z) --> in mm???
 
-    # todo have option here for non-lineaar if distorasion between 2P and Zslices --> run non-linear aafter linear intalizaion
-    if nonlinear_trans:  # if true then linear
+    # convert data to work with elastix software package
+    destination_feature = destination.astype(np.float32)
+    source_feature = source.astype(np.float32)
+    fixed_image_feature = itk.image_from_array(destination_feature)
+    moving_image_feature = itk.image_from_array(source_feature)
+    # define parameter file
+    parameter_object = itk.ParameterObject.New()
+    if nonlinear_trans:
+        default_bspline_parameter_map = parameter_object.GetDefaultParameterMap('bspline')
+        parameter_object.AddParameterMap(default_bspline_parameter_map)
+        parameter_object.SetParameter("Transform",
+                                      "BSplineTransform")  # this is non-linear(use (SplineKernelTransform) for feautres
+    else:
+        default_rigid_parameter_map = parameter_object.GetDefaultParameterMap('rigid')
+        parameter_object.AddParameterMap(default_rigid_parameter_map)
+        parameter_object.SetParameter("Transform", "SimilarityTransform")  # this is scale, rottation, and translation
+    parameter_object.SetParameter("Optimizer",
+                                  "StandardGradientDescent")  # full search # this allows me to pick step size what about evolutionary strategy? FullSearch, ConjugateGradient, ConjugateGradientFRPR, QuasiNewtonLBFGS, RSGDEachParameterApart, SimultaneousPerturbation, CMAEvolutionStrategy.
+    parameter_object.SetParameter("Registration", "MultiResolutionRegistration")
+    parameter_object.SetParameter("Metric",
+                                  "AdvancedKappaStatistic")  # "AdvancedNormalizedCorrelation") #AdvancedNormalizedCorrelation") #maybe AdvancedMattesMutualInformation
+    parameter_object.SetParameter("FixedInternalImagePixelType", "float")
+    parameter_object.SetParameter("MovingInternalImagePixelType", "float")
+    parameter_object.SetParameter("FixedImageDimension", "2")
+    parameter_object.SetParameter("MovingImageDimension", "2")
+    parameter_object.SetParameter("FixedImagePyramid", "FixedRecursiveImagePyramid")  # smooth and downsample
+    parameter_object.SetParameter("MovingImagePyramid", "MovingRecursiveImagePyramid")  # smooth and downsample
+    parameter_object.SetParameter("NumberOfResolutions", "6")  # high resoltuiions b/c large shifts
+    parameter_object.SetParameter("DefaultPixelValue", "0")  # this is b/c background is 0
+    parameter_object.SetParameter("ImageSampler",
+                                  "Grid")  # want full b/c random sampler would give different metric to compare results so full or grid should work, full is really slow
+    parameter_object.SetParameter("NewSamplesEveryIteration",
+                                  "false")  # want false b/c random sampler would give different metric to compare results
+    # parameter_object.SetParameter("Scales", "1.0")  # this is so rotation and translation treated equally
+    parameter_object.SetParameter("UseDirectionCosines", "false")
+    parameter_object.SetParameter("AutomaticTransformInitialization", "true")
+    parameter_object.SetParameter("AutomaticTransformInitializationMethod", "GeometricalCenter")
+    parameter_object.SetParameter("UseComplement", "false")
+    parameter_object.SetParameter("WriteResultImage", "true")
+    parameter_object.SetParameter("MaximumNumberOfIterations", "500")
+    parameter_object.SetParameter("MaximumNumberOfSamplingAttempts", "3")
 
-    return transformation
+    # get registration metirc for 180 and original data
+    result_image, result_transform_parameters = itk.elastix_registration_method(fixed_image=fixed_image_feature,
+                                                                                moving_image=moving_image_feature,
+                                                                                parameter_object=parameter_object,
+                                                                                log_to_console=True, log_to_file=True,
+                                                                                output_directory=localsubjectpath)
 
+    return result_transform_parameters
 
-def affine_registation(destination, source, degree_thres, theta_rad):
-    # AFFINE REGISTRATION
-    import torch
-    from torch import optim
-
-    # Create field grid (height x width x 2)
-    grid = registration.create_grid(field.shape)
-
-    # Create torch tensors
-    stack_ = torch.as_tensor(stack, dtype=torch.float32)
-    field_ = torch.as_tensor(field, dtype=torch.float32)
-    grid_ = torch.as_tensor(grid, dtype=torch.float32)
-
-    # Define parameters and optimizer
-    linear = torch.nn.Parameter(torch.eye(3)[:, :2])  # first two columns of rotation matrix
-    translation = torch.nn.Parameter(torch.tensor([rig_x, rig_y, rig_z]))  # translation vector
-    affine_optimizer = optim.Adam([{'params': linear, 'lr': lr_linear},
-                                   {'params': translation, 'lr': lr_translation}])
-
-    # Optimize
-    for i in range(affine_iters):
-        # Zero gradients
-        affine_optimizer.zero_grad()
-
-        # Compute gradients
-        pred_grid = registration.affine_product(grid_, linear, translation)  # w x h x 3
-        pred_field = registration.sample_grid(stack_, pred_grid)
-        corr_loss = -(pred_field * field_).sum() / (torch.norm(pred_field) *
-                                                    torch.norm(field_))
-        print('Corr at iteration {}: {:5.4f}'.format(i, -corr_loss))
-        corr_loss.backward()
-
-        # Update
-        affine_optimizer.step()
-
-    # Save em (originals will be modified during non-rigid registration)
-    affine_linear = linear.detach().clone()
-    affine_translation = translation.detach().clone()
-
-    return
 
 
 def part_in_whole_registration(whole_image, template):
@@ -1514,8 +1613,10 @@ def part_in_whole_registration(whole_image, template):
     template: The template image
 
     Output:
-    whole_imaage_template: The whole image thaat corresponds to the template
+    whole_image_template: The whole image that corresponds to the template
     XYZ_temp = the corrdinates of where the template is located within the whole image
+
+    see: https://docs.opencv.org/3.4/de/da9/tutorial_template_matching.html
     """
 
     # https: // scikit - image.org / docs / dev / auto_examples / features_detection / plot_template.html  # sphx-glr-auto-examples-features-detection-plot-template-py
@@ -1564,10 +1665,10 @@ def crop_Z(image, list_manual_Z_crop, Z, extra_figs, localsubjectpath):
         -   list_manual_Z_crop: the path to the excel file with cropping parameters for a given Z
         -   Z: Z value to search for given cropping parameters
         -   extra_figs: this is true to make figures, false to not make figures
-        - localsubjectpath: this is the path loction to save figures
+        - localsubjectpath: this is the path location to save figures
 
         Returns:
-        -	image_crop: this is the cropped image. After cropping image is zero padded. this will match 2d or 3D deimensiions in image
+        -	image_crop: this is the cropped image. After cropping image is zero padded. this will match 2d or 3D dimensions in image
     """
     # if list_manual_Z_crop is given then crop image before registration below
     if np.any(list_manual_Z_crop) is not None:
@@ -1642,6 +1743,8 @@ def crop_Z(image, list_manual_Z_crop, Z, extra_figs, localsubjectpath):
     return image_crop
 
 
+# todo add if phase correlatioin fails (based on??) then do feature based registration instead of phase correlation --> in case not mounted properly
+
 def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_feature, count_shiftZ, shiftZ, angleZ,
                    apply_transform, rigid_2d3d, error_overlap, find_rot, degree_thres, denoise_all, max_Z_proj_affine,
                    seq_dir, maxZshift_percent, Z, list_180_Z_rotation, auto_180_Z_rotation, localsubjectpath,
@@ -1649,17 +1752,30 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
     """
     This registers 2D to 3D along Z axis
         Args:
-        -	rc3d_feature, des3d_feature: the source and destination feature map, used to register rigid
+        -   src3d: raw source data to transform
+        -	src3d_feature, des3d_feature: the source and destination feature map, used to register rigid
         -   src3d_denoise, des3d_denoise: the source and destination deionised data, used to affine
         -   count_shiftZ: the number of countZ to load from saved array if needed
-        -   shiftZ: saved shifitZ data 
+        -   shiftZ, angleZ: saved shifitZ data translation and angle
         -   apply_transform: True if run saved transformations, false otherwise
         -   rigid_2d3d: True if run rigid registration, false otherwise
+        -   error_overlap,
+        -   find_rot: set to true if find rotation, other wise false
+        -   degree_thres,
+        -   denoise_all: set to ture to apply to all images, false if max projection used
+        -   max_Z_proj_affine: set to true for max projection
+        -   seq_dir = this is 'top' if POS1 is above POS 0 and 'bottom' if POS 1 is below POS 0
+        -   maxZshift_percent: "This is used place limits on the Z plane to Z plane translation. This is the percent of the image allowed for translation, if above this threhold set to 0 translation. The default is 25% of the image. (ex:--maxZshift_percent=25)(default:25)")
+        -   Z: current Z value for file names
+        -   list_180_Z_rotation: if user defined list of images to rotate 180 degrees
+        -   auto_180_Z_rotation: Set to true to automatically find the 180 degree rotation
+        -   localsubjectpath: file path to save files
+        -   Z_reg_denoise_or_feature: this is set to 'feaure' or 'denoise'. This registeres eaither denosie or freautre input based on this input
 
         Returns:
         -	src3d_T_feature: source feature file shifted with registration values
         -   des3d_feature : destination feature file
-        -   ount_shiftZ, shiftZ:  registration shift
+        -   count_shiftZ, shiftZ:  registration shift
         -   src3d_T: source raw file shifted with registration values
 
     """
@@ -1727,7 +1843,7 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
             # basic phase corr only
             shift, error, diffphase = skimage.registration.phase_cross_correlation(des3d_reg,
                                                                                    src3d_reg)
-            if shift[0] > Z_max_shift1 or shift[1] > Z_max_shift0:
+            if np.abs(shift[0]) > Z_max_shift1 or np.abs(shift[1]) > Z_max_shift0:
                 warnings.warn(
                     message="WARNING: Z shift exceeded limits, shift X = {} shift y = {}. Seeting Z translation to zero.".format(
                         shift[1], shift[0]))
@@ -1788,7 +1904,7 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
             # phase correlation here --> then motion based
             shift, error, diffphase = skimage.registration.phase_cross_correlation(des3d_reg,
                                                                                    src3d_reg)
-            if shift[0] > Z_max_shift1 or shift[1] > Z_max_shift0:
+            if np.abs(shift[0]) > Z_max_shift1 or np.abs(shift[1]) > Z_max_shift0:
                 warnings.warn(
                     message="WARNING: Z shift exceeded limits, shift X = {} shift y = {}. Seeting Z translation to zero.".format(
                         shift[1], shift[0]))
@@ -1804,8 +1920,19 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
             src3d_denoise_phase_shift = src3d_denoise_phase_shift.astype(src3d_reg.dtype)
             v, u = skimage.registration.optical_flow_tvl1(des3d_reg, src3d_denoise_phase_shift)
             # add phase and motion correction together
-            v_shift = v + shift[1]
-            u_shift = u + shift[0]
+            v_shift = v + -(shift[0])
+            u_shift = u + -(shift[1])
+            # check V and U are correctly added for all images
+            src3d_denoise_phase_shift_raw = skimage.transform.warp(src3d_denoise_phase_shift,
+                                                                   np.array([row_coords + v, col_coords + u]), order=0,
+                                                                   mode='nearest', preserve_range=True)
+            src3d_reg_check = skimage.transform.warp(src3d_reg, np.array([row_coords + v_shift, col_coords + u_shift]),
+                                                     order=0, mode='nearest', preserve_range=True)
+            testzeros = src3d_denoise_phase_shift_raw - src3d_reg_check
+            if testzeros.max() != testzeros.min():
+                warnings.warn(
+                    message="WARNING: optical registration not added correctly to phase correlation for Z = {}".format(
+                        Z))
             shiftZ.append([v_shift, u_shift])
             angleZ.append((angle_rad + theta_rad))
         error_allZ.append([error])
@@ -1872,6 +1999,47 @@ def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_fea
 
 
 """
+
+def affine_registation(destination, source, degree_thres, theta_rad):
+    # AFFINE REGISTRATION
+    import torch
+    from torch import optim
+
+    # Create field grid (height x width x 2)
+    grid = registration.create_grid(field.shape)
+
+    # Create torch tensors
+    stack_ = torch.as_tensor(stack, dtype=torch.float32)
+    field_ = torch.as_tensor(field, dtype=torch.float32)
+    grid_ = torch.as_tensor(grid, dtype=torch.float32)
+
+    # Define parameters and optimizer
+    linear = torch.nn.Parameter(torch.eye(3)[:, :2])  # first two columns of rotation matrix
+    translation = torch.nn.Parameter(torch.tensor([rig_x, rig_y, rig_z]))  # translation vector
+    affine_optimizer = optim.Adam([{'params': linear, 'lr': lr_linear},
+                                   {'params': translation, 'lr': lr_translation}])
+
+    # Optimize
+    for i in range(affine_iters):
+        # Zero gradients
+        affine_optimizer.zero_grad()
+
+        # Compute gradients
+        pred_grid = registration.affine_product(grid_, linear, translation)  # w x h x 3
+        pred_field = registration.sample_grid(stack_, pred_grid)
+        corr_loss = -(pred_field * field_).sum() / (torch.norm(pred_field) *
+                                                    torch.norm(field_))
+        print('Corr at iteration {}: {:5.4f}'.format(i, -corr_loss))
+        corr_loss.backward()
+
+        # Update
+        affine_optimizer.step()
+
+    # Save em (originals will be modified during non-rigid registration)
+    affine_linear = linear.detach().clone()
+    affine_translation = translation.detach().clone()
+
+    return
 
 def crop_Z(image, list_manual_Z_crop, Z):
     This crops a given image with defined y_start, y_end, x_start, x_end values. These are read in from list_manual_Z_crop

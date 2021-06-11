@@ -166,9 +166,6 @@ def parse_args(add_help=True):
 
 
 def main(args):
-    # todo test below:
-    # list_manual_Z_crop[Z][Ystart,Yend,Xstart,Xend]
-
     print("starting registration program")
     # if apply transform is ture
     if args.apply_transform:
@@ -238,6 +235,9 @@ def main(args):
 
         # todo take this out of pathi loop?
         args.localsubjectpath = args.localsubjectpath + '/' + args.output + '/'
+
+        # todo add functionality of multiple server, username and passwords for different folders
+
         print("reading file name for file size")
         # get maximum Z
         ALLCubeZ = np.zeros(len(cubefolder))
@@ -400,6 +400,9 @@ def main(args):
                                 desY_one = desY[:, :, 0]
                             else:
                                 warnings.warn("opticalZ_dir variable not defined correctly")
+
+                        # todo move denoise BEFORE registration overlap????
+
                         if args.denoise_all:
                             srcY_T_re_denoise = func2d3d.denoise(srcY_T_re, args.FFT_max_gaussian, args.high_thres)
                         else:
@@ -421,6 +424,7 @@ def main(args):
                             plt.close()
                         del srcY_T, SKI_Trans_all, srcY, srcY_T_re_one
                         if X == 1:
+                            # todo move denoise BEFORE registration overlap????
                             if args.denoise_all:
                                 print('desY shape {}'.format(desY.shape))
                                 desY_denoise = func2d3d.denoise(desY, args.FFT_max_gaussian, args.high_thres)
@@ -602,8 +606,9 @@ def main(args):
                 # DON'T register Because nothing to register
                 if Zplane_denoise.min() < 0:
                     Zplane_denoise = des3d_denoise + abs(des3d_denoise.min())
-                Zplane_denoise = np.log1p(Zplane_denoise)
-                # crop image if nessisary
+                if args.Z_log_transform:
+                    Zplane_denoise = np.log1p(Zplane_denoise)
+                # crop image if necessary
                 if np.any(args.list_manual_Z_crop) is not None:
                     Zplane_denoise = func2d3d.crop_Z(Zplane_denoise, args.list_manual_Z_crop, Z, args.extra_figs,
                                                      args.localsubjectpath)
@@ -629,25 +634,17 @@ def main(args):
                 # shift data so no negative values
                 if src3d_denoise.min() < 0:
                     src3d_denoise = src3d_denoise + abs(src3d_denoise.min())
-                # if des3d_denoise.min() < 0:
-                #    des3d_denoise = des3d_denoise + abs(des3d_denoise.min()) #DO NOT NEED B/C done in last round and in z=0
                 # log transfrom data
                 if args.Z_log_transform:
                     src3d_denoise = np.log1p(src3d_denoise)
-                #   des3d_denoise = np.log1p(des3d_denoise)  #DO NOT NEED B/C done in last round and in z=0
                 # crop image if nessisary
                 if np.any(args.list_manual_Z_crop) is not None:
                     src3d_denoise = func2d3d.crop_Z(src3d_denoise, args.list_manual_Z_crop, Z, args.extra_figs,
                                                     args.localsubjectpath)
-                    # dont need on des3d_denoise b/x z=0 done with b4 and old image carried over to next Z iteration
-
                 # get feature map for each optical slice with segmentation
                 src3d_feature = func2d3d.segmentation(src3d_denoise, args.checkerboard_size, args.seg_interations,
                                                       args.seg_smooth, args.localsubjectpath, Z, args.segment_otsu,
                                                       args.extra_figs)
-                # we dont need line below b/c we  carry this over to next iteration and add on Z=0
-                # Zold = Z - 1  # define old Z for naming not needed b/c all calculation done on Z then carried over to next iteration
-                # des3d_feature = func2d3d.segmentation(des3d_denoise, args.checkerboard_size, args.seg_interations, args.seg_smooth, args.localsubjectpath, Zold, args.segment_otsu, args.extra_figs)
                 # zero pad b/c des3d_feature from before zero pad on this iteration
                 dim = 0
                 [src3d_feature, des3d_feature] = func2d3d.zero_pad(src3d_feature, des3d_feature, dim)
