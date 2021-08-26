@@ -14,6 +14,7 @@ Input: (required)
     --remotesubjectpath: This is full path where to files are located eaither locally (ex:--remotesubjectpath='/grid/zador/home/vinehout/code/2d_3D_linear_reg/data') or on remote server (ex:--remotesubjectpath='/home/imagestorage/lectin_1/')
 
 
+
 Output:
     -outputs are saved under 'localsubjectpath/registration'
     -reg_3Dimage: numpy array of 3D brain
