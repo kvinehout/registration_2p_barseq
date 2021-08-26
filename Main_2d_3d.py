@@ -88,7 +88,7 @@ def parse_args(add_help=True):
     parser.add_argument("--localsubjectpath", required=True, type=str,
                         help="This is full path where to load and save files (ex:'/grid/zador/home/vinehout/code/2d_3D_linear_reg/')")
     parser.add_argument("--remotesubjectpath", required=True, type=str, action='append',
-                        help="This is full path where to files are located eaither locally or on remote server (ex:'/home/imagestorage/ZadorConfocal1/xiaoyin/20201205JB050tomatolectinlabeling647/lectin_1/'")
+                        help="This is full path where to files are located eaither locally or on remote server. Multiple inputs acccepted. (ex:'/home/imagestorage/ZadorConfocal1/xiaoyin/20201205JB050tomatolectinlabeling647/lectin_1/'")
     # this adds optional input arguments
     parser.add_argument("--input_overlap", default=None, type=float,
                         help="Percent image overlap. 0-1, 0.10 represents 10 percent. (ex:--input_overlap=0.10)")
@@ -98,14 +98,17 @@ def parse_args(add_help=True):
                         help="This is if zero along X is on the 'left' or 'right' of the image (defult:'right'")
     parser.add_argument("--Y_dir", default='top', choices=['top', 'bottom'],
                         help="This is if zero along Y is on the 'top' or 'bottom' of the image (defult:'top'")
-    parser.add_argument('--server', default='local', type=str,
-                        help="Name of server files are located,(ex:'zadorstorage2.cshl.edu') set to 'local' if files on local computer. (default: 'local')")
-    parser.add_argument('--user', default=None, type=str,
-                        help="Name of user to access server where filels are located,(ex:'user1'), Not required files on local computer. (default: None)")
-    parser.add_argument('--password', default=None, type=str,
-                        help="Password to access server where filels are located,(ex:'mypassword'), Not required files on local computer. (default: None)")
-    parser.add_argument('--FFT_max_gaussian', default=10, type=int,
-                        help="High_Sigma value for band pass filtering to remove low frequencies. See skimage.filters.difference_of_gaussians for details (default: 10)")
+    parser.add_argument('--server', default=['local'], type=str, nargs='+',
+                        help="Name of server files are located,(ex:'zadorstorage2.cshl.edu') set to 'local' if files on local computer. Multiple inputs acccepted. (default: 'local')")
+    parser.add_argument('--user', default=['user'], type=str, nargs='+',
+                        help="Name of user to access server where filels are located,(ex:'user1'), Not required files on local computer.Multiple inputs acccepted. (default: None)")
+    parser.add_argument('--password', default=['password'], type=str, nargs='+',
+                        help="Password to access server where filels are located,(ex:'mypassword'), Not required files on local computer.Multiple inputs acccepted. (default: None)")
+    parser.add_argument('--rolling_ball_radius', default=500, type=int,
+                        help="This is the radius for rolling ball for background estiamtion. Set to zero to skip this step. THis is in number of pixels see: https://scikit-image.org/docs/dev/auto_examples/segmentation/plot_rolling_ball.html#sphx-glr-auto-examples-segmentation-plot-rolling-ball-py (default: 500)")
+    parser.add_argument('--double_gaussian', nargs=2, type=str, metavar=('Low_gaussian', 'High_gausian'),
+                        default=['1', '100'],
+                        help='Defines low and high Gaussian for double Gaussian filter. The first number is the low the second is high. Set second value to zero to skip this step. (EX: --double_gaussian 1 100) (defualt [1,100].')
     parser.add_argument('--error_overlap', default=0.15, type=float,
                         help="Largest accetable error from input_overlay and actual registration shift. Percentage error repersented as a decimal (ex:0.10) (default 15 percent: 0.15)")
     parser.add_argument('--blank_thres', default=1.5, type=float,
@@ -162,6 +165,12 @@ def parse_args(add_help=True):
     parser.add_argument("--Z_log_transform", default=False, type=str2bool,
                         help="This applys a log transform after denoising to the Z plane data, use this is data has very low SNR (ex:--Z_log_transform=True)(default:False)")
 
+    parser.add_argument("--Noise2void_or_classical", default=False, type=str2bool,
+                        help="This applies noise2void Mahcine learning to remove noise instead of classical (wavlet, TVnorm, non-local means) if set to true (ex:--Noise2void_or_classical=True)(default:False)")
+
+    parser.add_argument("--Noise2Void_own_model", default=True, type=str2bool,
+                        help="This applies noise2void Mahcine learning to EACH X Y Z value. Otherwise model just created for each Z plane and applied to all images in that Z plane (ex:--Noise2Void_own_model=True)(default:True)")
+
     return parser
 
 
@@ -191,32 +200,36 @@ def main(args):
     error_all_within = []
     error_allX = []
     error_allY = []
-    # todo paraellize these for loops?? thredding and multiprocess package?? --> need child processing?
+    # todo parallelize these for loops?? threading and multiprocess package?? --> need child processing?
+    # https://docs.python.org/3/library/multiprocessing.html
     # use cprofile and profile to see where most time spend? or Cython --> complie to C?
     # check if multiple folders are input into remotesubjectpath if so combine all this data
     # append values?
     # memorize function? --> only if use same input multipel times... basically makes dictionary
     # use hashing to store variables?
 
-    # todo addd nosie2self deep learning. Load ALL data in folder to train model then add option to denoise with this model instead of classical denoise approaches
-    # step1: load ALL DATA
-    # step1.5: remove blank data from tranining? is max>>>>mean?
-    # step2: train noise2self
-    # step 3: use this data to load in code below--> so replace Raw with this (and skip denoise below)
-    # denoise_noise2self
-    # or this?https://github.com/COMP6248-Reproducability-Challenge/selfsupervised-denoising or https://github.com/NVlabs/selfsupervised-denoising
-
+    # if using noise 2 void and denoise_all is false--> give warning that should work for denoise_all = true
+    if args.Noise2void_or_classical and not args.denoise_all:
+        warnings.warn(
+            message='Noise2void_or_classical is true yet denoise_all is false, consider setting denoise_all to true')
     count_Z_folder = 0  # this counts for all Z folder
     for pathi in range(int(args.remotesubjectpath.__len__())):
         remotesubjectpath_one = args.remotesubjectpath[pathi]
+        # add functionality of multiple server, username and passwords for different folders
+        server_one = args.server[pathi]
+        user_one = args.user[pathi]
+        password_one = args.password[pathi]
         print(remotesubjectpath_one)
+        print(server_one)
+        print(user_one)
+        print(password_one)
         # get all file images to load in 3D cube
         # find number of Z axis --> this is number of imaging slices
         # connect to server
-        if args.server != 'local':
+        if server_one != 'local':
             ssh_con = paramiko.SSHClient()
             ssh_con.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh_con.connect(hostname=args.server, username=args.user, password=args.password)
+            ssh_con.connect(hostname=server_one, username=user_one, password=password_one)
             sftp_con = ssh_con.open_sftp()
             # get list of folders cubes in data path
             all_files_in_path = sftp_con.listdir(path=remotesubjectpath_one)
@@ -235,8 +248,6 @@ def main(args):
 
         # todo take this out of pathi loop?
         args.localsubjectpath = args.localsubjectpath + '/' + args.output + '/'
-
-        # todo add functionality of multiple server, username and passwords for different folders
 
         print("reading file name for file size")
         # get maximum Z
@@ -277,6 +288,42 @@ def main(args):
             MaxCubeX = max(ALLCubeX)
             MaxCubeY = max(ALLCubeY)
             del ALLCubeX, ALLCubeY
+            # create ML denoise model for this Z plane --> saves time over new model for each X, Y, Z
+            if args.Noise2void_or_classical:
+
+                # todo take ALL denoise outside of this for loop so it can be in own for loop and run multiprocessing on denoise?
+                # note cant run parrel on registration b/c past results needed for future result
+
+                print('Calculating Noise2Void model because Noise2void_or_classical set to true')
+                Zstring = str(Z_one)
+                Ystring = '00' + str(int(MaxCubeY / 2))  # hard code chosenn Y in middle of image
+                Xstring = '00' + str(int(MaxCubeX / 2))  # hard code chosenn X in middle of image
+                cubename = '/Pos' + Zstring + '_' + Xstring + '_' + Ystring + '/'
+                # download files in this X Y Z folder --> this is ONE cube
+                remotefilepath = remotesubjectpath_one + cubename
+                localfilepath = args.localsubjectpath  # dont need folder path b/c images removed after downloaded
+                # download and define 3D variable for files in this folder
+                imarray3D = func2d3d.sshfoldertransfer(server_one, user_one, password_one, remotefilepath,
+                                                       localfilepath, args.image_type, args.opticalZ_dir)
+                model_name = 'model_Z={}'.format(Z)
+                # remove high intensity large before noise 2 void
+                for count_Z_3d in range(imarray3D.shape[2]):
+                    A = imarray3D[:, :, count_Z_3d]
+                    if (A > (args.high_thres * A.mean())).any() and A.ndim == 2:
+                        warnings.warn(message='High intensity Image detected')
+                        high_thres_dec = args.high_thres / 100
+                        # remove whole connected image to this
+                        int_thres = (args.high_thres * A.mean())
+                        area_thres = A.shape[1] * (high_thres_dec / 2)
+                        imarray3D[:, :, count_Z_3d] = func2d3d.remove_large_obj(A, area_thres, int_thres,
+                                                                                args.rolling_ball_radius,
+                                                                                args.double_gaussian, high_thres_dec)
+                imarray3D = func2d3d.noise2void(imarray3D, model_name, args.localsubjectpath, args.rolling_ball_radius,
+                                                args.double_gaussian)
+
+                # todo add why to get % image overlap based on middle images in X and Y
+
+                del imarray3D
             # for Y
             for Y in range(int(MaxCubeY) + 1):
                 print("Y = {}".format(Y))
@@ -291,8 +338,29 @@ def main(args):
                     remotefilepath = remotesubjectpath_one + cubename
                     localfilepath = args.localsubjectpath  # dont need folder path b/c images removed after downloaded
                     # download and define 3D variable for files in this folder
-                    imarray3D = func2d3d.sshfoldertransfer(args.server, args.user, args.password, remotefilepath,
+                    imarray3D = func2d3d.sshfoldertransfer(server_one, user_one, password_one, remotefilepath,
                                                            localfilepath, args.image_type, args.opticalZ_dir)
+                    # denoise the loaded 3d data with noise 2 void
+                    if args.Noise2void_or_classical:
+                        if args.Noise2Void_own_model:
+                            model_name = 'model_Z={}_Y={}_X={}'.format(Z, Y, X)  # NEW MODEL FOR EACH X Y Z VALUE
+                        else:
+                            model_name = 'model_Z={}'.format(Z)  # same Z model as above
+                        # remove high intesnity and large image b4 noise 2 void
+                        for count_Z_3d in range(imarray3D.shape[2]):
+                            A = imarray3D[:, :, count_Z_3d]
+                            if (A > (args.high_thres * A.mean())).any() and A.ndim == 2:
+                                warnings.warn(message='High intensity Image detected')
+                                high_thres_dec = args.high_thres / 100
+                                # remove whole connected image to this
+                                int_thres = (args.high_thres * A.mean())
+                                area_thres = A.shape[1] * (high_thres_dec / 2)
+                                imarray3D[:, :, count_Z_3d] = func2d3d.remove_large_obj(A, area_thres, int_thres,
+                                                                                        args.rolling_ball_radius,
+                                                                                        args.double_gaussian,
+                                                                                        high_thres_dec)
+                        imarray3D = func2d3d.noise2void(imarray3D, model_name, args.localsubjectpath,
+                                                        args.rolling_ball_radius, args.double_gaussian)
                     print("Registration of optical slices within folder {}.".format(remotefilepath))
                     # STEP 1 --> ALIGN SLICES in IMARRAY 3D
                     for i in range(len(imarray3D[1, 1, :]) - 1):
@@ -313,11 +381,14 @@ def main(args):
                                                                                      shift_reg[1], shift_reg[0]))
                             count_shift_within = count_shift_within + 1
                         else:
-                            error, shift_reg, Within_Trans = func2d3d.registration_within(A, B, args.FFT_max_gaussian,
+                            error, shift_reg, Within_Trans = func2d3d.registration_within(A, B,
+                                                                                          args.rolling_ball_radius,
+                                                                                          args.double_gaussian,
                                                                                           args.error_overlap, X, Y, Z,
                                                                                           i, args.localsubjectpath,
                                                                                           args.extra_figs,
-                                                                                          args.high_thres)
+                                                                                          args.high_thres,
+                                                                                          args.Noise2void_or_classical)
                             # apply value to shift ONLY if calculating shift
                             shift_within.append(shift_reg)
                         error_all_within.append(error)
@@ -354,18 +425,8 @@ def main(args):
                             if X == 1 and Y == 0 and Z == 0:  # calculate the initial stitch level ONLY for first overlap
                                 error, shift, target_overlapX, blank_overlap = func2d3d.registration_X(srcY, desY,
                                                                                                        args.X_dir,
-                                                                                                       args.FFT_max_gaussian,
-                                                                                                       args.error_overlap,
-                                                                                                       X, Y, Z,
-                                                                                                       args.blank_thres,
-                                                                                                       args.localsubjectpath,
-                                                                                                       args.extra_figs,
-                                                                                                       args.high_thres,
-                                                                                                       args.input_overlap)
-                            else:
-                                error, shift, target_overlapX, blank_overlap = func2d3d.registration_X(srcY, desY,
-                                                                                                       args.X_dir,
-                                                                                                       args.FFT_max_gaussian,
+                                                                                                       args.rolling_ball_radius,
+                                                                                                       args.double_gaussian,
                                                                                                        args.error_overlap,
                                                                                                        X, Y, Z,
                                                                                                        args.blank_thres,
@@ -373,6 +434,20 @@ def main(args):
                                                                                                        args.extra_figs,
                                                                                                        args.high_thres,
                                                                                                        args.input_overlap,
+                                                                                                       args.Noise2void_or_classical)
+                            else:
+                                error, shift, target_overlapX, blank_overlap = func2d3d.registration_X(srcY, desY,
+                                                                                                       args.X_dir,
+                                                                                                       args.rolling_ball_radius,
+                                                                                                       args.double_gaussian,
+                                                                                                       args.error_overlap,
+                                                                                                       X, Y, Z,
+                                                                                                       args.blank_thres,
+                                                                                                       args.localsubjectpath,
+                                                                                                       args.extra_figs,
+                                                                                                       args.high_thres,
+                                                                                                       args.input_overlap,
+                                                                                                       args.Noise2void_or_classical,
                                                                                                        target_overlapX)
                             shiftX.append(shift)
                         error_allX.append(error)
@@ -404,32 +479,31 @@ def main(args):
                         # todo move denoise BEFORE registration overlap????
 
                         if args.denoise_all:
-                            srcY_T_re_denoise = func2d3d.denoise(srcY_T_re, args.FFT_max_gaussian, args.high_thres)
+                            srcY_T_re_denoise = func2d3d.denoise(srcY_T_re, args.rolling_ball_radius,
+                                                                 args.double_gaussian, args.high_thres,
+                                                                 args.Noise2void_or_classical)
                         else:
-                            srcY_T_re_denoise = func2d3d.denoise(srcY_T_re_one, args.FFT_max_gaussian, args.high_thres)
+                            srcY_T_re_denoise = func2d3d.denoise(srcY_T_re_one, args.rolling_ball_radius,
+                                                                 args.double_gaussian, args.high_thres,
+                                                                 args.Noise2void_or_classical)
                         if args.extra_figs:
-                            plt.figure()
-                            plt.imshow(srcY_T_re_one)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                             name = 'X={}_Y={}_Z={}'.format(X, Y, Z)
-                            plt.savefig(args.localsubjectpath + name + '_raw.png', format='png')
-                            plt.close()
-                            plt.figure()
-                            if args.denoise_all:
-                                plt.imshow(np.max(srcY_T_re_denoise,
-                                                  axis=2))  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-                            else:
-                                plt.imshow(srcY_T_re_denoise)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-                            name = 'X={}_Y={}_Z={}'.format(X, Y, Z)
-                            plt.savefig(args.localsubjectpath + name + '_denoised.png', format='png')
-                            plt.close()
+                            name_raw = args.localsubjectpath + name + '_raw.png'
+                            func2d3d.make_figure(srcY_T_re_one, name_raw)
+                            name_denoise = args.localsubjectpath + name + '_denoised.png'
+                            func2d3d.make_figure(srcY_T_re_denoise, name_denoise)
                         del srcY_T, SKI_Trans_all, srcY, srcY_T_re_one
                         if X == 1:
                             # todo move denoise BEFORE registration overlap????
                             if args.denoise_all:
                                 print('desY shape {}'.format(desY.shape))
-                                desY_denoise = func2d3d.denoise(desY, args.FFT_max_gaussian, args.high_thres)
+                                desY_denoise = func2d3d.denoise(desY, args.rolling_ball_radius, args.double_gaussian,
+                                                                args.high_thres,
+                                                                args.Noise2void_or_classical)
                             else:
-                                desY_denoise = func2d3d.denoise(desY_one, args.FFT_max_gaussian, args.high_thres)
+                                desY_denoise = func2d3d.denoise(desY_one, args.rolling_ball_radius,
+                                                                args.double_gaussian, args.high_thres,
+                                                                args.Noise2void_or_classical)
                             # concat 3D volumes together
                             if args.X_dir == 'right':
                                 Y_img = np.concatenate((srcY_T_re, desY), axis=1)
@@ -438,15 +512,9 @@ def main(args):
                                 Y_img = np.concatenate((desY, srcY_T_re), axis=1)
                                 Y_img_denoise = np.concatenate((desY_denoise, srcY_T_re_denoise), axis=1)
                             if args.extra_figs:
-                                plt.figure()
-                                if args.denoise_all:
-                                    plt.imshow(np.max(Y_img_denoise),
-                                               axis=2)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-                                else:
-                                    plt.imshow(Y_img_denoise)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                                 name = 'X={}_Y={}_Z={}'.format(X, Y, Z)
-                                plt.savefig(args.localsubjectpath + name + 'Y_img_denoise.png', format='png')
-                                plt.close()
+                                Yimg_denoise_name = args.localsubjectpath + name + 'Y_img_denoise.png'
+                                func2d3d.make_figure(Y_img_denoise, Yimg_denoise_name)
                         else:
                             if args.X_dir == 'right':
                                 Y_img = np.concatenate((srcY_T_re, Yline),
@@ -467,15 +535,9 @@ def main(args):
                         AB_img_old = AB_img
                         del AB_img, desY, srcY_T_re, shift, error, Y_img, Y_img_denoise, srcY_T_re_denoise
                         if args.extra_figs:
-                            plt.figure()
-                            if args.denoise_all:
-                                plt.imshow(
-                                    np.max(Yline_denoise, axis=2))  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-                            else:
-                                plt.imshow(Yline_denoise)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                             name = 'X={}_Y={}_Z={}'.format(X, Y, Z)
-                            plt.savefig(args.localsubjectpath + name + 'Yline_denoise.png', format='png')
-                            plt.close()
+                            Yline_denoise_name = args.localsubjectpath + name + 'Yline_denoise.png'
+                            func2d3d.make_figure(Yline_denoise, Yline_denoise_name)
                 # STEP 2 Z plane: Stitch together images with first X initial guess and O3D point to point ICP registration (1st make Y lines, then combine Y lines
                 srcZ = Yline  # this is the Y to add to rest
                 srcZ_denoise = Yline_denoise
@@ -496,20 +558,25 @@ def main(args):
                     else:
                         if Y == 1 and Z == 0:  # calculate the initial stitch level ONLY for first overlap
                             error, shift, target_overlapY = func2d3d.registration_Y(srcZ, desZ, args.Y_dir,
-                                                                                    args.FFT_max_gaussian,
+                                                                                    args.rolling_ball_radius,
+                                                                                    args.double_gaussian,
                                                                                     args.error_overlap, X, Y, Z,
                                                                                     args.blank_thres,
                                                                                     args.localsubjectpath,
                                                                                     args.extra_figs, args.high_thres,
-                                                                                    args.input_overlap)
+                                                                                    args.input_overlap,
+                                                                                    args.Noise2void_or_classical)
                         else:
                             error, shift, target_overlapY = func2d3d.registration_Y(srcZ, desZ, args.Y_dir,
-                                                                                    args.FFT_max_gaussian,
+                                                                                    args.rolling_ball_radius,
+                                                                                    args.double_gaussian,
                                                                                     args.error_overlap, X, Y, Z,
                                                                                     args.blank_thres,
                                                                                     args.localsubjectpath,
                                                                                     args.extra_figs, args.high_thres,
-                                                                                    args.input_overlap, target_overlapY)
+                                                                                    args.input_overlap,
+                                                                                    args.Noise2void_or_classical,
+                                                                                    target_overlapY)
                         shiftY.append(shift)
                     error_allY.append(error)
                     del AB_img_old
@@ -542,15 +609,9 @@ def main(args):
                                                                    mode='edge', preserve_range=True)
                         srcZ_T_re_denoise = srcZ_T_re_denoise.astype(srcZ_denoise.dtype)
                     if args.extra_figs:
-                        plt.figure()
-                        if args.denoise_all:
-                            plt.imshow(
-                                np.max(srcZ_T_re_denoise, axis=2))  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-                        else:
-                            plt.imshow(srcZ_T_re_denoise)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                         name = 'X={}_Y={}_Z={}'.format(X, Y, Z)
-                        plt.savefig(args.localsubjectpath + name + 'srcZ_T_re_denoise.png', format='png')
-                        plt.close()
+                        srcZ_T_re_denoise_name = args.localsubjectpath + name + 'srcZ_T_re_denoise.png'
+                        func2d3d.make_figure(srcZ_T_re_denoise, srcZ_T_re_denoise_name)
                     del srcZ_T
                     if Y == 1:
                         # pad the Zplane in the X
@@ -586,15 +647,9 @@ def main(args):
                     Yline_old = Yline
                     Yline_old_denoise = Yline_denoise
                     if args.extra_figs:
-                        plt.figure()
-                        if args.denoise_all:
-                            plt.imshow(
-                                np.max(Z_img_denoise, axis=2))  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-                        else:
-                            plt.imshow(Z_img_denoise)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
                         name = 'X={}_Y={}_Z={}'.format(X, Y, Z)
-                        plt.savefig(args.localsubjectpath + name + 'Z_img_denoise.png', format='png')
-                        plt.close()
+                        Z_img_denoise_name = args.localsubjectpath + name + 'Z_img_denoise.png'
+                        func2d3d.make_figure(Z_img_denoise, Z_img_denoise_name)
                     del Yline, Yline_denoise, Z_img, Z_img_denoise, desZ, desZ_denoise, srcZ, srcZ_denoise, srcZ_T_re, srcZ_T_re_denoise, error, shift
             # Step 3 combine Z plane ---> use ICP without initial guess (maybe globally registration? )
             # WHAT If foR z we take mean in optical Z to get feautre map
@@ -605,7 +660,7 @@ def main(args):
             if Z == 0:
                 # DON'T register Because nothing to register
                 if Zplane_denoise.min() < 0:
-                    Zplane_denoise = des3d_denoise + abs(des3d_denoise.min())
+                    Zplane_denoise = Zplane_denoise + abs(Zplane_denoise.min())
                 if args.Z_log_transform:
                     Zplane_denoise = np.log1p(Zplane_denoise)
                 # crop image if necessary
@@ -614,7 +669,7 @@ def main(args):
                                                      args.localsubjectpath)
                 Zplane_old_feature = func2d3d.segmentation(Zplane_denoise, args.checkerboard_size, args.seg_interations,
                                                            args.seg_smooth, args.localsubjectpath, Z, args.segment_otsu,
-                                                           args.extra_figs)
+                                                           args.extra_figs, args.max_Z_proj_affine)
                 Zplane_old = Zplane
                 Zplane_old_denoise = Zplane_denoise
                 del Zplane, Yline_old, Zplane_denoise, Yline_old_denoise
@@ -644,7 +699,7 @@ def main(args):
                 # get feature map for each optical slice with segmentation
                 src3d_feature = func2d3d.segmentation(src3d_denoise, args.checkerboard_size, args.seg_interations,
                                                       args.seg_smooth, args.localsubjectpath, Z, args.segment_otsu,
-                                                      args.extra_figs)
+                                                      args.extra_figs, args.max_Z_proj_affine)
                 # zero pad b/c des3d_feature from before zero pad on this iteration
                 dim = 0
                 [src3d_feature, des3d_feature] = func2d3d.zero_pad(src3d_feature, des3d_feature, dim)
@@ -661,25 +716,14 @@ def main(args):
                     args.auto_180_Z_rotation, args.localsubjectpath, args.Z_reg_denoise_or_feature)
                 if args.extra_figs:
                     # make plots of Z plane
-                    plt.figure()
-                    plt.imshow(np.max(src3d, axis=2))  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-                    plt.savefig(args.localsubjectpath + '/Z=' + str(Z) + '_Zplane_raw.png', format='png')
-                    plt.close()
-                    plt.figure()
-                    plt.imshow(src3d_T_feature)
-                    plt.savefig(args.localsubjectpath + '/Z=' + str(Z) + '_Zplane_feature_shift.png', format='png')
-                    plt.close()
-                    plt.figure()
-                    if args.denoise_all:
-                        plt.imshow(np.max(src3d_denoise, axis=2))  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-                    else:
-                        plt.imshow(src3d_denoise)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-                    plt.savefig(args.localsubjectpath + '/Z=' + str(Z) + '_Zplane_denoise.png', format='png')
-                    plt.close()
-                    plt.figure()
-                    plt.imshow(src3d_feature)
-                    plt.savefig(args.localsubjectpath + '/Z=' + str(Z) + '_Zplane_feature.png', format='png')
-                    plt.close()
+                    Zplane_raw_name = args.localsubjectpath + '/Z=' + str(Z) + '_Zplane_raw.png'
+                    func2d3d.make_figure(src3d, Zplane_raw_name)
+                    Zplane_feature_shift_name = args.localsubjectpath + '/Z=' + str(Z) + '_Zplane_feature_shift.png'
+                    func2d3d.make_figure(src3d_T_feature, Zplane_feature_shift_name)
+                    Zplane_denoise_name = args.localsubjectpath + '/Z=' + str(Z) + '_Zplane_denoise.png'
+                    func2d3d.make_figure(src3d_denoise, Zplane_denoise_name)
+                    Zplane_feature_name = args.localsubjectpath + '/Z=' + str(Z) + '_Zplane_feature.png'
+                    func2d3d.make_figure(src3d_feature, Zplane_feature_name)
                 if Z == 1:
                     # pad in the Y
                     dim = 0
@@ -691,9 +735,12 @@ def main(args):
                     [des3d, src3d_T] = func2d3d.zero_pad(des3d, src3d_T, dim)
                     [des3d_denoise, src3d_T_denoise] = func2d3d.zero_pad(des3d_denoise, src3d_T_denoise, dim)
                     [des3d_feature, src3d_T_feature] = func2d3d.zero_pad(des3d_feature, src3d_T_feature, dim)
-                    # expand dimentions of ndim = 2 data
-                    src3d_T_feature = np.expand_dims(src3d_T_feature, axis=-1)
-                    des3d_feature = np.expand_dims(des3d_feature, axis=-1)
+                    # expand dimensions of ndim = 2 data
+                    # expand feature map dimensions if needed
+                    if src3d_T_feature.ndim == 2:  # todo do we need this line?
+                        src3d_T_feature = np.expand_dims(src3d_T_feature, axis=-1)
+                    if des3d_feature.ndim == 2:  # todo do we need this line?
+                        des3d_feature = np.expand_dims(des3d_feature, axis=-1)
                     # this is done if denoise_all is not selected then ndim==2
                     if des3d_denoise.ndim == 2:
                         des3d_denoise = np.expand_dims(des3d_denoise, axis=-1)
@@ -1140,7 +1187,7 @@ remotesubjectpath_reg = remotesubjectpath + '/registration/'
 if server != 'local':
     ssh_con = paramiko.SSHClient()
     ssh_con.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    ssh_con.connect(hostname=server, username=user, password=args.password)
+    ssh_con.connect(hostname=server, username=user, password=password)
     sftp_con = ssh_con.open_sftp()
     sftp_con = ssh.open_sftp()
     #make new folder on remote area

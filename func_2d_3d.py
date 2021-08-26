@@ -51,11 +51,269 @@ from skimage.metrics import mean_squared_error as mse
 from skimage.metrics import peak_signal_noise_ratio as psnr
 from sklearn.neighbors import NearestNeighbors
 
+# We import all our dependencies.
+from n2v.models import N2VConfig, N2V
+from csbdeep.utils import plot_history
+from n2v.utils.n2v_utils import manipulate_val_data
+from n2v.internals.N2V_DataGenerator import N2V_DataGenerator
+import urllib
+import zipfile
+# We import all our dependencies.
+from tifffile import imread
+from csbdeep.io import save_tiff_imagej_compatible
+
 
 # import ICP
 
 
 # todo add unit tests after each function???
+
+def make_figure(data, fig_name):
+    """
+    This makes and saves figures, this scales data for visualization
+        Args:
+        -	data: Numpy array 3D or 2D to be shown (YXZ --> max projection in  3rd dimension)
+        Returns:
+        -	fig_name: Full File path and .png name to save fig as
+    """
+    plt.figure()
+    # if 3D
+    if data.ndim == 3:
+        plt.imshow(np.max(data, axis=2), cmap='magma', vmin=np.percentile(data, 0.1), vmax=np.percentile(data, 99.9))
+    # if 2D
+    elif data.ndim == 2:
+        plt.imshow(data, cmap='magma', vmin=np.percentile(data, 0.1), vmax=np.percentile(data, 99.9))
+    plt.show()
+    plt.savefig('{}'.format(fig_name), format='png')
+    plt.close()
+    return 0
+
+
+def remove_light_effect(data, rolling_ball_radius, double_gaussian):
+    """
+    Removes noise in 3d  or 2D image with rolling ball
+        Args:
+        -	data: Numpy array 3D or 2d to be deionised
+        Returns:
+        -	data_denoise: Numpy array 3D with noise removed
+    """
+    # run if not equal to zero
+    if rolling_ball_radius != 0:
+        # data_denoise = skimage.filters.difference_of_gaussians(pred_YXZ, 1, FFT_max_gaussian)
+        # issue with this is its the 0..0000001 values to we to remove so this step would make rolling ball pointless and be too agressive in noise reduction
+        # im_src3d = Image.fromarray(source)
+        # pred_YXZ_for_rolling = np.interp(pred_YXZ, (pred_YXZ.min(), pred_YXZ.max()), (0, +255))
+        # change dtype to unit 8 --> so get rid of decimals
+        # pred_YXZ_for_rolling = pred_YXZ_for_rolling.astype(np.uint8)
+        normalized_radius = (rolling_ball_radius / data.max()) * 2
+        radius_ellipsoid = rolling_ball_radius * 2
+        if data.ndim == 3:
+            kernelRB = restoration.ellipsoid_kernel((radius_ellipsoid, radius_ellipsoid),
+                                                    normalized_radius)  # this  uses a rolling ball size in X and Y,  size effect in Z and rolling ball size in intesnsity
+            # here convert 3D to 2D to help with computational time
+            data2d = np.max(data, axis=2)
+            background = restoration.rolling_ball(data2d, nansafe=True, kernel=kernelRB)
+            # copy 2D background in 3D
+            background3d = np.repeat(background[:, :, np.newaxis], data.shape[2], axis=2)
+            data_denoise1 = data - background3d
+        if data.ndim == 2:
+            kernelRB = restoration.ellipsoid_kernel((radius_ellipsoid, radius_ellipsoid), normalized_radius)
+            background = restoration.rolling_ball(data, nansafe=True, kernel=kernelRB)
+            data_denoise1 = data - background
+    else:
+        data_denoise1 = data
+    if double_gaussian[1] != 0 and double_gaussian[1] != 'None' and double_gaussian[0] != 'None':
+        data_denoise2 = skimage.filters.difference_of_gaussians(data_denoise1, double_gaussian[0], double_gaussian[1])
+    else:
+        data_denoise2 = data_denoise1
+    return data_denoise2
+
+
+def noise2void(data, model_name, localsubjectpath, rolling_ball_radius, double_gaussian, patch_size=64):
+    """
+    Removes noise in 3d image using the noise 2 void method. Based on https://arxiv.org/abs/1811.10980 w/ this implementation: https://github.com/juglab/n2v
+        Args:
+        -	data: Numpy array 3D or 2d to be deionised, 3d volume needs at least 5 slices otherwise only 2D model created
+        -   model: name of model to load, if provided this model is used to denoise instead of model made from data otherwise this is name given to model (ex:     #model_name = 'n2v_3D_blk')
+        - localfilepath: path to save models, folder called models created in this path
+        - rolling_ball_radius: this is used from rolling ball size, set to 0 to skip this step. Recommended value of 500
+        -patch_size: this is the size of patches in X and Y, default is 64
+        Returns:
+        -	data_denoise: Numpy array 3D with noise removed
+    """
+
+    # todo need to edit so run on GPU????
+
+    # check at least volume of 5, if not then use first image
+    if data.ndim == 3 and data.shape[2] <= 5:
+        warnings.warn(
+            message='Warning: For noise2void only {} slices provided for 3D volume, need 4 or more. Running 2D model on first 2D image in 3D volume'.format(
+                data.shape[2]))
+        data = data[:, :, 0]
+    # We create our DataGenerator-object.
+    datagen = N2V_DataGenerator()
+    # In the 'dims' parameter we specify the order of dimensions in the image files we are reading.
+    if data.ndim == 2:
+        print('2D image found to denosie')
+        dataZYX = data
+        data_exp = np.expand_dims(dataZYX, axis=(0, 1,
+                                                 4))  # expand dimensions One at the front is used to hold a potential stack of images such as a movie, One at the end could hold color channels such as RGB. #expand dimensions One at the front is used to hold a potential stack of images such as a movie, One at the end could hold color channels such as RGB.
+        patch_shape = (patch_size, patch_size)
+        model_axis = 'YX'
+    if data.ndim == 3:
+        print('3D image found to denosie')
+        dataZYX = np.moveaxis(data, 2, 0)  # rearage so YXZ is now ZYX
+        data_exp = np.expand_dims(dataZYX, axis=(0, 1,
+                                                 5))  # expand dimensions One at the front is used to hold a potential stack of images such as a movie, One at the end could hold color channels such as RGB.
+        # Here we extract patches for training and validation.
+        n = dataZYX.shape[0] - 1  # use -1 b/c we dont want patches to take up whole image
+        Z_patch_size = None
+        while n >= 4:
+            # patch Z needs to be divisible by 4 to trian model
+            if n % 4 == 0 and Z_patch_size == None:
+                Z_patch_size = n
+            n = n - 1
+        print('Z_patch_size of {}'.format(Z_patch_size))
+        patch_shape = (Z_patch_size, patch_size, patch_size)
+        model_axis = 'ZYX'
+    print('arrary with extra dimensions is size of {}'.format(data_exp.shape))
+    print('patches are {}'.format(patch_shape))
+    # the base directory in which our model will live
+    basedir = localsubjectpath + 'models'
+    path = basedir + '/' + model_name
+    if not os.path.exists(path):
+        print(path)
+        # create model
+        patches = datagen.generate_patches_from_list(data_exp, shape=patch_shape)
+        print('patches shape {}'.format(patches.shape))
+        # Patches are created so they do not overlap.
+        # (Note: this is not the case if you specify a number of patches. See the docstring for details!)
+        # Non-overlapping patches enable us to split them into a training and validation set.
+        # modify split so set as a %
+        perc_95 = int(patches.shape[0] * 0.95)
+        X = patches[:perc_95]  # this is 600/640
+        X_val = patches[perc_95:]  # this is 40/640
+
+        # train model
+        # You can increase "train_steps_per_epoch" to get even better results at the price of longer computation.
+        fast = 128  # default
+        slow = 50  # to get better results?  --> apply same model to Z plane
+        speed = slow
+
+        # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        config = N2VConfig(X, unet_kern_size=3, train_steps_per_epoch=int(X.shape[0] / speed), train_epochs=20,
+                           train_loss='mse', batch_norm=True, train_batch_size=4, n2v_perc_pix=0.198,
+                           n2v_patch_shape=patch_shape, n2v_manipulator='uniform_withCP', n2v_neighborhood_radius=5)
+
+        # Let's look at the parameters stored in the config-object.
+        vars(config)
+        # We are now creating our network model.
+        model = N2V(config=config, name=model_name, basedir=basedir)
+
+        history = model.train(X, X_val)
+        print(sorted(list(history.history.keys())))
+        plt.figure(figsize=(16, 5))
+        plot_history(history, ['loss', 'val_loss'])
+        plt.savefig(localsubjectpath + model_name + '_history_noise2void.png', format='png')
+        plt.close()
+
+        model.export_TF(name='Noise2Void - data',
+                        description='This is the 3D Noise2Void for  data.',
+                        authors=["Kaleb Vinehout"],
+                        test_img=X_val[0, ..., 0], axes=model_axis,
+                        patch_shape=patch_shape)
+    # run prediction model on rest of data in 3D image
+
+    # A previously trained model is loaded by creating a new N2V-object without providing a 'config'.
+    model = N2V(config=None, name=model_name, basedir=basedir)
+    # Here we process the data.
+    # The 'n_tiles' parameter can be used if images are too big for the GPU memory.
+    # If we do not provide the 'n_tiles' parameter the system will automatically try to find an appropriate tiling.
+    pred = model.predict(dataZYX, axes=model_axis)  # , n_tiles=(2, 4, 4))
+    # change so axis matches input order
+    if data.ndim == 2:
+        pred_YXZ = pred  # no rearage
+    if data.ndim == 3:
+        pred_YXZ = np.moveaxis(pred, 0, 2)  # rearage so YXZ is now ZYX
+    # remove lighting effect
+    data_denoise = remove_light_effect(pred_YXZ, rolling_ball_radius, double_gaussian)
+    # save figures
+    fig_name_ori = localsubjectpath + model_name + '_before_noise2void.png'
+    make_figure(data, fig_name_ori)  # orginal data
+    fig_name_only_N2V = localsubjectpath + model_name + '_ONLY_after_noise2void.png'
+    make_figure(pred_YXZ, fig_name_only_N2V)  # orginal data
+    fig_name_pred = localsubjectpath + model_name + '_after_noise2void.png'
+    make_figure(data_denoise, fig_name_pred)  # denoised data data
+
+    return data_denoise
+
+
+def wavlet_registration(image1, image2):
+    import pywt
+    import cv2
+    import numpy as np
+
+    # This function does the coefficient fusing according to the fusion method
+    def fuseCoeff(cooef1, cooef2, method):
+
+        if (method == 'mean'):
+            cooef = (cooef1 + cooef2) / 2
+        elif (method == 'min'):
+            cooef = np.minimum(cooef1, cooef2)
+        elif (method == 'max'):
+            cooef = np.maximum(cooef1, cooef2)
+        else:
+            cooef = []
+
+        return cooef
+
+    # Params
+    FUSION_METHOD = 'mean'  # Can be 'min' || 'max || anything you choose according theory
+
+    # Read the two image
+    I1 = cv2.imread('i1.bmp', 0)
+    I2 = cv2.imread('i2.jpg', 0)
+
+    # We need to have both images the same size
+    I2 = cv2.resize(I2, I1.shape)  # I do this just because i used two random images
+
+    ## Fusion algo
+
+    # First: Do wavelet transform on each image
+    wavelet = 'db1'
+    cooef1 = pywt.wavedec2(I1[:, :], wavelet)
+    cooef2 = pywt.wavedec2(I2[:, :], wavelet)
+
+    # Second: for each level in both image do the fusion according to the desire option
+    fusedCooef = []
+    for i in range(len(cooef1) - 1):
+
+        # The first values in each decomposition is the apprximation values of the top level
+        if (i == 0):
+
+            fusedCooef.append(fuseCoeff(cooef1[0], cooef2[0], FUSION_METHOD))
+
+        else:
+
+            # For the rest of the levels we have tupels with 3 coeeficents
+            c1 = fuseCoeff(cooef1[i][0], cooef2[i][0], FUSION_METHOD)
+            c2 = fuseCoeff(cooef1[i][1], cooef2[i][1], FUSION_METHOD)
+            c3 = fuseCoeff(cooef1[i][2], cooef2[i][2], FUSION_METHOD)
+
+            fusedCooef.append((c1, c2, c3))
+
+    # Third: After we fused the cooefficent we nned to transfor back to get the image
+    fusedImage = pywt.waverec2(fusedCooef, wavelet)
+
+    # Forth: normmalize values to be in uint8
+    fusedImage = np.multiply(np.divide(fusedImage - np.min(fusedImage), (np.max(fusedImage) - np.min(fusedImage))), 255)
+    fusedImage = fusedImage.astype(np.uint8)
+
+    # Fith: Show image
+    cv2.imshow("win", fusedImage)
+
+    return fusedImage
 
 
 # define file load function
@@ -186,21 +444,22 @@ def multi_slice_viewer(volume):
     return
 
 
-def remove_large_obj(A, area_thres, int_thres, FFT_max_gaussian, high_thres_dec):
+def remove_large_obj(A, area_thres, int_thres, rolling_ball_radius, double_gaussian, high_thres_dec):
     """
         This removes large and high intensity objects from image
         Args:
         -A Numpy array to be searched for large high intensity regions
         - area_thres: this the square root of the area minimum to look for
         -int_thres:  this the intensity to look for
-        -FFT_max_gaussian: to filter low frequency out of image
+        -rolling_ball_radius: to filter low frequency out of image
         -high_thres_dec: the amount to increase boundary by to insure full inclosure of large object
         Returns:
         -mask_A: This is the image with the large birght area masked out
 
     """
     ori_A = np.copy(A)
-    filt_A = skimage.filters.difference_of_gaussians(A, 1, FFT_max_gaussian)
+    # filt_A = skimage.filters.difference_of_gaussians(A, 1, rolling_ball_radius)
+    filt_A = remove_light_effect(A, rolling_ball_radius, double_gaussian)
     # denoise with wavlet this might not have much of an effect
     denoise = skimage.restoration.denoise_wavelet(filt_A, multichannel=False, rescale_sigma=True)
     # set stuff below mean to zero? --> for some reason this works best
@@ -258,10 +517,1858 @@ def remove_large_obj(A, area_thres, int_thres, FFT_max_gaussian, high_thres_dec)
     return mask_A
 
 
+def denoise(A, rolling_ball_radius, double_gaussian, high_thres, Noise2void_or_classical):
+    """
+    This denoises the data with the optimal of wavlet, TV norm, or non-local means
+        Args:
+        -A Numpy array to be denoised
+        - high_thres: this is the threshold to very high values
+        -rolling_ball_radius: this is radius of rolling ball
+        Returns:
+        -	denoised: denoised image
+
+    """
+    if Noise2void_or_classical:
+        print('Skipping classical denoise because Noise2void_or_classical set to true')
+        denoised = A
+    else:
+        sigma_est_ori = np.max(skimage.restoration.estimate_sigma(A, multichannel=False))
+        print(f"estimated noise standard deviation = {sigma_est_ori}")
+        # remove extremely high values --> remove hair
+        if (A > (high_thres * A.mean())).any() and A.ndim == 2:
+            warnings.warn(message='High intensity Image detected')
+            high_thres_dec = high_thres / 100
+            # remove whole connected image to this
+            int_thres = (high_thres * A.mean())
+            area_thres = A.shape[1] * (high_thres_dec / 2)
+            A = remove_large_obj(A, area_thres, int_thres, rolling_ball_radius, high_thres_dec)
+
+        # remove salt and peper with TV norm, wavlet or non-local means
+        # calibrate TV norm
+        parameter_ranges_tv = {'weight': np.arange(0.1, 0.3, 0.5), 'eps': np.arange(0.0002, 0.001, 0.04),
+                               'n_iter_max': np.arange(200, 300, 100), 'multichannel': [False]}
+        _, (parameters_tested_tv, losses_tv) = calibrate_denoiser(A, denoise_tv_chambolle,
+                                                                  denoise_parameters=parameter_ranges_tv,
+                                                                  extra_output=True)
+        best_parameters_tv = parameters_tested_tv[np.argmin(losses_tv)]
+        denoised_calibrated_tv = _invariant_denoise(A, denoise_tv_chambolle, denoiser_kwargs=best_parameters_tv)
+        print(f'Minimum self-supervised loss TV: {np.min(losses_tv):.4f}')
+        # calibrate wavelet
+        parameter_ranges_wavelet = {'wavelet': ['db1', 'db2', 'haar'], 'convert2ycbcr': [False],
+                                    'multichannel': [False],
+                                    'rescale_sigma': [True], 'mode': ['soft'], 'method': ['BayesShrink']}
+        _, (parameters_tested_wavelet, losses_wavelet) = calibrate_denoiser(A, denoise_wavelet,
+                                                                            parameter_ranges_wavelet, extra_output=True)
+        best_parameters_wavelet = parameters_tested_wavelet[np.argmin(losses_wavelet)]
+        denoised_calibrated_wavelet = _invariant_denoise(A, denoise_wavelet, denoiser_kwargs=best_parameters_wavelet)
+        print(f'Minimum self-supervised loss wavelet: {np.min(losses_wavelet):.4f}')
+        # calibrate nl means
+        sigma_est = estimate_sigma(A)
+        parameter_ranges_nl = {'h': np.arange(1.15, 2, 5) * sigma_est, 'patch_size': np.arange(5, 10, 5),
+                               'patch_distance': np.arange(6, 10, 5), 'multichannel': [False], 'fast_mode': [True],
+                               'preserve_range': [True]}
+        _, (parameters_tested_nl, losses_nl) = calibrate_denoiser(A, denoise_nl_means, parameter_ranges_nl,
+                                                                  extra_output=True)
+        best_parameters_nl = parameters_tested_nl[np.argmin(losses_nl)]
+        denoised_calibrated_nl = _invariant_denoise(A, denoise_nl_means, denoiser_kwargs=best_parameters_nl)
+        print(f'Minimum self-supervised loss NL means: {np.min(losses_nl):.4f}')
+        Low_methods = [np.min(losses_tv), np.min(losses_wavelet), np.min(losses_nl)]
+        if Low_methods.index(min(Low_methods)) == 0:
+            print(f'Method Minimum self-supervised loss is for TV: {np.min(losses_tv):.4f}')
+            denoised1 = denoised_calibrated_tv
+        elif Low_methods.index(min(Low_methods)) == 1:
+            print(f'Method Minimum self-supervised loss is for wavelet: {np.min(losses_wavelet):.4f}')
+            denoised1 = denoised_calibrated_wavelet
+        elif Low_methods.index(min(Low_methods)) == 2:
+            print(f'Method Minimum self-supervised loss is for NL means: {np.min(losses_nl):.4f}')
+            denoised1 = denoised_calibrated_nl
+        else:
+            warnings.warn(message='Optimal denoise failed')
+            denoised1 = A
+        denoised1 = skimage.util.img_as_float(denoised1)
+        # after salt and pepper removed with above then use FFT or maybe rolling-ball (removes too much)  b/c rolling ball sensitive to salt/pepper.
+        # denoised = skimage.filters.difference_of_gaussians(denoised1, 1, rolling_ball_radius)
+        denoised = remove_light_effect(denoised1, rolling_ball_radius, double_gaussian)
+        # if all values in image are the same value set blank image to zero (should be the case already)
+        if denoised.all() == denoised.max():
+            warnings.warn(message='Blank denoise image')
+        # if less then one --> #identify blank image?? does it matter??? why?
+        if np.max(denoised) < 1:
+            denoised = skimage.img_as_uint(denoised, force_copy=False)
+
+    return denoised
+
+
+def store_evolution_in(lst):
+    """Returns a callback function to store the evolution of the level sets in
+    the given list. THIS IS USED FOR SEGMENTATION
+    """
+
+    def _store(x):
+        lst.append(np.copy(x))
+
+    return _store
+
+
+def remove_zero_segmntation(A_seg, A, Z):
+    """Find if one segmented image has all zeros, if so then replace. only do this if NOT segmented into ONLY zero and ones
+    """
+    A_seg_ori = np.copy(A_seg)
+    # find if one segmentation has all zeros, if so then replace zero segmentation with lowest segmenation
+    seg_values_max = np.ones(A_seg.max() + 1)
+    seg_values_min = np.ones(A_seg.max() + 1)
+    all_zero_seg = []
+    for count in range(A_seg.max() + 1):
+        seg_values_max[count] = np.max(A[np.where(A_seg == count)])
+        seg_values_min[count] = np.min(A[np.where(A_seg == count)])
+        if seg_values_max[count] == 0 and seg_values_min[count] == 0:
+            all_zero_seg.append(count)
+    for i in range(len(all_zero_seg)):
+        count = all_zero_seg[i]
+        # change seg_values_min to doesnt have count value
+        seg_values_min_new = np.delete(seg_values_min, count, axis=0)
+        replace_value = np.where(seg_values_min == (seg_values_min_new[seg_values_min_new.argmin()]))
+        A_seg[np.where(A_seg == count)] = replace_value
+        if i > 0:
+            warnings.warn(
+                "Warning: Z image {} segmentation detection of multiple segmentation with zero value, this should not hapen ".format(
+                    str(Z)))
+    return A_seg, all_zero_seg
+
+
+def segmentation_W_net(A):
+    """
+    This segments the image with W net
+    Args:
+        - A Numpy array to be segmented
+    Returns:
+        -   A_seg: segmented image
+    """
+
+    # w-net w/normalzied cut
+    # https://github.com/lwchen6309/unsupervised-image-segmentation-by-WNet-with-NormalizedCut
+    # w-net w/ smoothing in video
+    # https://github.com/LouisFoucard/w-net
+
+    # https://aswali.github.io/WNet/
+    # if 2D use on 1 dataset to train/test
+
+    # if 3D use all Z slices to train model
+
+    # need multiple images so use each Z resolution as seporate image & rotate flip ext the images
+    # is it possible to do this with one image? a segmentation2void ???
+
+    # https://github.com/lwchen6309/unsupervised-image-segmentation-by-WNet-with-NormalizedCut
+    # https://github.com/lwchen6309/unsupervised-image-segmentation-by-WNet-with-NormalizedCut           https://github.com/shekkizh/FCN.tensorflow
+
+    # todo add ML-based segmentation: --> maybe just use W net here
+    # https://github.com/NVlabs/SegFormer or https://www.google.com/search?q=machine+learning+self+supervised+segmentation&ei=uorLYLWOFau8ggeP3pvoDA&oq=machine+learning+self+supervised++segmentation&gs_lcp=Cgdnd3Mtd2l6EAEYADIFCCEQqwIyBQghEKsCUABYAGCEC2gAcAB4AIAB0hiIAZJGkgEDOS0zmAEAqgEHZ3dzLXdpeg&sclient=gws-wiz&ved=0ahUKEwi108fsnJ_xAhUrnuAKHQ_vBs0Q4dUDCA4&uact=5
+    # https://www.biorxiv.org/content/10.1101/2021.01.07.425773v1
+    # maybe just W net here???
+    # https://www.biorxiv.org/content/10.1101/2021.05.17.444529v1
+    # https://arxiv.org/abs/2104.14294
+
+    return A_seg
+
+
+def segmentation(A, checkerboard_size, seg_interations, seg_smooth, localsubjectpath, Z, segment_otsu, extra_figs,
+                 max_Z_proj_affine):
+    """
+    This segments the image with chan vase
+        Args:
+        - A Numpy array to be segmented
+        - seg_interations: number of interations for chan_vese segmentation
+        - checkerboard_size:  size of checkerboard for chan_vese segmentatioin
+        -seg_smooth: number of smoothing/iterations for chan_vese segmentation
+        -localsubjectpath: this is where to save figures
+        -Z: Current Z value for figure names
+        -segment_otsu ture to run otsu segmentation, false to run chan_vaase segmentation
+        -extra_figs true to create extra figures
+        Returns:
+        -   A_seg: segmented image
+
+    """
+
+    if extra_figs:
+        np.save(localsubjectpath + 'Z=' + str(Z) + '_denoise_for_segmentation', A)
+
+    # do this before segmentaion???
+    # image = cv2.GaussianBlur(image, (5, 5), 0)
+
+    # local otsu? https://scikit-image.org/docs/0.12.x/auto_examples/segmentation/plot_local_otsu.html
+    # issue with local is that most area would just be noise....
+    # img = np.interp(img, (img.min(), img.max()), (0, +255))
+    # img = img.astype(np.uint8)
+    # img = img_as_ubyte(img)
+    # radius = 15
+    # selem = disk(radius)
+    # local_otsu = rank.otsu(img, selem)
+    # A_seg=img >= local_otsu
+    # imshow(img >= local_otsu, cmap=plt.cm.gray)
+    # threshold_global_otsu = threshold_otsu(img)
+    # global_otsu = img >= threshold_global_otsu
+
+    if max_Z_proj_affine and A.ndim == 3:  # this is done b/c for registration bewteen slices we want max here if max done elsewhere
+        A = np.max(A, axis=2)
+    if segment_otsu:
+        # get threshold values for binary image (b/c only 2 classes)
+        thresholds = threshold_multiotsu(A, classes=2)
+        # Using the threshold values, we generate the three regions.
+        A_seg2 = np.digitize(A, bins=thresholds)
+        A_seg2, all_zero_seg = remove_zero_segmntation(A_seg2, A, Z)
+
+        # todo why not make this a for loop that combines all zero groups until increaseing number of classes doesnt give addditional zero group???
+        # todo this is basically trying to find ideal number of clusters????
+        # zero_classes=0
+        # numclass = 3
+        # while zero_classes < 1:
+        # thresholds = threshold_multiotsu(A, classes=numclass) #todo why does this give classes without any data????
+        # A_seg = np.digitize(A, bins=thresholds)
+        # remove empty classes
+        # todo remove empty classes np.histogram(A_seg)
+
+        # if empty classes exits
+        # zero_classes=1
+
+        # numclass = numclass + 1
+        # combine zero segmented into other classes if needed
+        # A_seg3, all_zero_seg = remove_zero_segmntation(A_seg3, A, Z)
+        # set all but highest class value to zero
+        # result = np.where(A_seg3<numclass, 0, A_seg3)
+
+        if len(all_zero_seg):  # use 3 classes if segmentation with all zeros exists
+            thresholds = threshold_multiotsu(A, classes=3)
+            A_seg3 = np.digitize(A, bins=thresholds)
+            # make sure len(np.unique(A_seg)) >= 3
+            if len(np.unique(A_seg3)) >= 3:
+                A_seg3, all_zero_seg = remove_zero_segmntation(A_seg3, A, Z)
+                A_seg = A_seg3
+            else:
+                # todo figure this part out???? --> why is this werid??? ddue to remove large object zeros???
+                print('segmentation has only 2 classes with 3 classes set')
+                thresholds = threshold_multiotsu(A, classes=2)
+                # Using the threshold values, we generate the three regions.
+                A_seg2_raw = np.digitize(A, bins=thresholds)
+                A_seg = A_seg2_raw
+        else:
+            A_seg = A_seg2
+    else:
+        # Initial level set
+        init_ls = skimage.segmentation.checkerboard_level_set(A.shape, checkerboard_size)  # default is 5
+        # List with intermediate results for plotting the evolution
+        evolution = []
+        callback = store_evolution_in(evolution)
+        # smoothing of 3 works
+        A_seg = skimage.segmentation.morphological_chan_vese(A, seg_interations, init_level_set=init_ls,
+                                                             smoothing=seg_smooth,
+                                                             iter_callback=callback)  # here 35 is the number of iterations and smoothing=3 is number of times smoothing applied/iteration
+        # remove segmentation if all zeros
+        A_seg, all_zero_seg = remove_zero_segmntation(A_seg, A, Z)
+        if len(all_zero_seg):  # use otsu 3 classes if zero segmentation exisits
+            warnings.warn(
+                "Warning: Z image {} segmentation of all zeros deteccted, using otsu segmentation with 3 classes ".format(
+                    str(Z)))
+            thresholds = threshold_multiotsu(A, classes=3)
+            A_seg = np.digitize(A, bins=thresholds)
+            A_seg, all_zero_seg = remove_zero_segmntation(A_seg, A, Z)
+
+    # check to make sure segmented values start at zero
+    if A_seg.min() != 0:
+        A_seg = A_seg - A_seg.min()
+        warnings.warn(
+            "Warning: Z image {} segmentation starts at nonzero, shifting to zero segmentation ".format(str(Z)))
+
+    # check to make sure background =0 and segment brain is =1
+    if np.count_nonzero(A_seg == A_seg.max()) > np.count_nonzero(A_seg == 0):
+        # inverse image
+        A_seg = A_seg.max() - A_seg
+        warnings.warn(
+            "Warning: Z image {} segmentation of background labeled high, inverting segmentation ".format(str(Z)))
+
+    # todo remove grid lines in segmented image
+    # A_seg_gray = np.interp(A_seg, (A_seg.min(), A_seg.max()), (0, +255))
+    # change dtype to unit 8 --> so get rid of decimals
+    # A_seg_gray = A_seg_gray.astype(np.uint8)
+    # img_gauss = cv2.GaussianBlur(A_seg_gray, ksize=(13, 13), sigmaX=10)
+    # ret, img_gauss_th = cv2.threshold(img_gauss, thresh=127, maxval=255, type=cv2.THRESH_BINARY)
+    # edges = cv2.Canny(image=img_gauss_th, threshold1=240, threshold2=255)
+    # edges_smoothed = cv2.GaussianBlur(edges, ksize=(5, 5), sigmaX=10)
+    # lines = cv2.HoughLinesP(edges_smoothed, rho=1, theta=1 * np.pi / 180, threshold=40, minLineLength=30, maxLineGap=25)
+    # img_hough_lines_contours = np.ones(A_seg_gray.shape)
+    # line_nos = lines.shape[0]
+    # for i in range(line_nos):
+    #    x_1 = lines[i][0][0]
+    #    y_1 = lines[i][0][1]
+    #    x_2 = lines[i][0][2]
+    #    y_2 = lines[i][0][3]
+    #    cv2.line(A_seg, pt1=(x_1, y_1), pt2=(x_2, y_2), color=(255, 0, 0), thickness=2)
+    # img_hough_lines = A_seg_gray.copy()
+    # img_hough_lines[img_hough_lines_contours == 0] = 255
+
+    if extra_figs:
+        nameA = localsubjectpath + '/Z=' + str(Z) + '_Zplane_before_seg.png'
+        make_figure(A, nameA)
+        nameAseg = localsubjectpath + '/Z=' + str(Z) + '_Zplane_after_segmented.png'
+        make_figure(A_seg, nameAseg)
+    return A_seg
+
+
+def feature_CV2(destination_raw, source_raw, diroverlap, rolling_ball_radius, double_gaussian, high_thres,
+                localsubjectpath,
+                input_overlap, Noise2void_or_classical):
+    # todo try https://scikit-image.org/docs/dev/auto_examples/features_detection/plot_brief.html#sphx-glr-auto-examples-features-detection-plot-brief-py
+    # https://scikit-image.org/docs/dev/auto_examples/features_detection/plot_orb.html#sphx-glr-auto-examples-features-detection-plot-orb-py
+    """This finds the overlay given A and B with feature based registration
+        Args:
+        -	source_raw: 3D set of images to overlap source (moving image)
+        -   destination_raw: 3D set of images to overlap target
+        -   diroverlap: the direction of overlap, the direction the source image moves --> up, down, left or right
+        -  rolling_ball_radius: used for denoise
+        -  high_thres: used for denoise
+        - localsubjectpath: path to save intermediate figures
+        -input_overlap: provided overlap value
+
+        Returns:
+        -	target_overlap: pixel number of overlay
+    """
+    destination_mean = np.max(destination_raw, axis=2)
+    source_mean = np.max(source_raw, axis=2)
+    # denoise image
+    destination_denoise = denoise(destination_mean, rolling_ball_radius, double_gaussian, high_thres,
+                                  Noise2void_or_classical)
+    source_denoise = denoise(source_mean, rolling_ball_radius, double_gaussian, high_thres, Noise2void_or_classical)
+
+    # todo segment images here before feaure based and remove gray scale conversion?
+
+    # define denoised data
+    destination = destination_denoise
+    source = source_denoise
+    # convert to grayscale
+
+    # todo remove converstion to gray scale?
+
+    destination = np.interp(destination, (destination.min(), destination.max()), (0, +255))
+    source = np.interp(source, (source.min(), source.max()), (0, +255))
+    # change dtype to unit 8 --> so get rid of decimals
+    destination = destination.astype(np.uint8)
+    source = source.astype(np.uint8)
+    im_src3d = Image.fromarray(source)
+    im_src3d.save(localsubjectpath + "src3d_denoise.jpeg")
+    im_des3d = Image.fromarray(destination)
+    im_des3d.save(localsubjectpath + "des3d_denoise.jpeg")
+    # Read reference imagw
+    refFilename = '{}/{}'.format(localsubjectpath, 'des3d_denoise.jpeg')
+    imReference = cv2.imread(refFilename, cv2.IMREAD_GRAYSCALE)
+    # Read image to be aligned
+    imFilename = '{}/{}'.format(localsubjectpath, 'src3d_denoise.jpeg')
+    im1 = cv2.imread(imFilename, cv2.IMREAD_GRAYSCALE)
+    # preallocate shift
+    shift = np.zeros(2)
+    MAX_MATCHES = 500
+    GOOD_MATCH_PERCENT = 0.05  # this is 5 percent
+    # Convert images to grayscale
+    im1Gray = im1  # cv2.cvtColor(im1, cv2.COLOR_BGR2GRAY)
+    im2Gray = imReference  # cv2.cvtColor(imReference, cv2.COLOR_BGR2GRAY)
+    # Detect ORB features and compute descriptors.
+    orb = cv2.ORB_create(MAX_MATCHES)
+    keypoints1, descriptors1 = orb.detectAndCompute(im1Gray, None)
+    keypoints2, descriptors2 = orb.detectAndCompute(im2Gray, None)
+    if np.any(descriptors1) == None or np.any(descriptors2) == None:
+        if input_overlap == None:
+            warnings.warn("ERROR: CAN NOT CALCULATE IMAGE OVERLAP PLEASE PROVIDE --input_overlap VALUE")
+        else:
+            warnings.warn("Warning: Can not calculate image overlap, instead using input_overlap value")
+            target_overlap = input_overlap
+    else:
+        # Match features. # get SAME NUMBER OF points for source and destination??? https://www.youtube.com/watch?v=cA8K8dl-E6k
+        # matcher = cv2.DescriptorMatcher_create(cv2.DESCRIPTOR_MATCHER_BRUTEFORCE_SL2)#BRUTEFORCE_HAMMING)
+        # matches = matcher.match(descriptors1, descriptors2, None)
+        # create BFMatcher object
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        # Match descriptors.
+        matches = bf.match(descriptors1, descriptors2)
+        # Sort matches by score
+        matches.sort(key=lambda x: x.distance, reverse=False)
+        # Remove not so good matches
+        numGoodMatches = int(len(matches) * GOOD_MATCH_PERCENT)
+        # matches = matches[:numGoodMatches]
+        # Draw top matches
+        imMatches = cv2.drawMatches(im1, keypoints1, imReference, keypoints2, matches, None)
+        cv2.imwrite(localsubjectpath + "/matches.jpg", imMatches)
+        # Extract location of good matches
+        points1 = np.zeros((len(matches), 2), dtype=np.float32)
+        points2 = np.zeros((len(matches), 2), dtype=np.float32)
+        for i, match in enumerate(matches):
+            points1[i, :] = keypoints1[match.queryIdx].pt
+            points2[i, :] = keypoints2[match.trainIdx].pt
+        # Find Affine Transformation
+        # note swap of order of newpoints here so that image2 is warped to match image1
+        # if not enough points match --> set to input_overlap or warning message to add overlap
+        if points1.shape[0] < 2 or points1.shape[0] < 2:
+            if input_overlap == None:
+                warnings.warn("ERROR: CAN NOT CALCULATE IMAGE OVERLAP PLEASE PROVIDE --input_overlap VALUE")
+            else:
+                warnings.warn("Warning: Can not calculate image overlap, instead using input_overlap value")
+                target_overlap = input_overlap
+        else:
+            m, inliers = cv2.estimateAffinePartial2D(points1, points2)
+            # Use affine transform to warp im2 to match im1
+            height, width = imReference.shape
+            im1Reg = cv2.warpAffine(im1, m, (width, height))
+            shift[0] = m[1, 2]
+            shift[1] = m[0, 2]
+            error = 0  # todo add this?
+            # abs used below so source or destination order doesnt matter and subject from edge to get overlap value
+            if diroverlap == 'up' or diroverlap == 'down':
+                target_overlap = source_raw.shape[0] - abs(int(round(shift[0])))
+            elif diroverlap == 'left' or diroverlap == 'right':
+                target_overlap = source_raw.shape[1] - abs(int(round(shift[1])))
+            else:
+                warnings.warn(
+                    "WARNING: diroverlap not defined correctly, Set to down, up, left or right. Currently set to {} ".format(
+                        diroverlap))
+    return target_overlap,
+
+
+# todo rework this function? maybe replace with combo of other functions?
+# todo if we move denoise to BEFORE registration for X and Y then only need to segment here if fails for X and Y, although denoise still useful if WITHIN registration (add input for this ???)
+# this is used once in registration within, once in registration X, once in registration Y --> this is used when not in range
+
+def Seg_reg_phase(A, B, rolling_ball_radius, double_gaussian, name, extra_figs, high_thres, Noise2void_or_classical):
+    """
+    This denoise and segments data then finds phase correlation of segmented data. This is used if registration is outside of range when first performed.
+        Args:
+        -	A,B: Numpy array 3D image
+        - FFT_max_gausian: this is for removing low frequency sugested value = 10
+        - name: file name to save
+        - extra_figs: This is true to make extra figures
+        - high_thres:
+        Returns:
+        -	shift_reg: shift of transfrom
+        -	error: error of transfrom
+        -	Within_Trans: Transform
+    """
+
+    # denoise data
+    maskA = denoise(A, rolling_ball_radius, double_gaussian, high_thres, Noise2void_or_classical)
+    maskB = denoise(B, rolling_ball_radius, double_gaussian, high_thres, Noise2void_or_classical)
+
+    # segment data --> issue is chan vase segmnetation fails with little data.... does ostu?
+    # what about log trnasform? and postive value shift?
+    # A_seg=segmentation(A, checkerboard_size, seg_interations, seg_smooth, localsubjectpath, Z, segment_otsu, extra_figs)
+    # A_seg = segmentation(A, checkerboard_size, seg_interations, seg_smooth, localsubjectpath, Z, segment_otsu, extra_figs)
+
+    # shift segmented data
+    shift_reg, error, diffphase = skimage.registration.phase_cross_correlation(maskA, maskB)
+    print('Filtered diff phase of {}'.format(diffphase))
+    Within_Trans = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=0,
+                                                         translation=(shift_reg[1], shift_reg[0]))
+    if extra_figs:
+        maskA_name = name + 'overlay_mask_A.png'
+        make_figure(maskA, maskA_name)
+        maskB_name = name + 'overlay_mask_B.png'
+        make_figure(maskB, maskB_name)
+
+    return shift_reg, error, Within_Trans
+
+
+def zero_pad(A, B, dim):
+    """
+    This makes arrays the same size (zero pad) along dim
+        Args:
+        -	A,B: the A and B array to make the same size
+        -   dim: dim overlap only accepts 0 or 1
+
+        Returns:
+        -	A_pad,B_pad: arrays zero padded
+
+    """
+
+    # remove extra dimensions
+    A = np.squeeze(A)
+    B = np.squeeze(B)
+
+    data_dype = A.dtype
+
+    if A.ndim == 2 and B.ndim == 2:
+        if A.shape[dim] > B.shape[dim]:
+            # B_pad = np.zeros(A.shape)  # * np.mean(srcZ_T_re)
+            if dim == 1:
+                B_pad = np.zeros([B.shape[0], A.shape[1]], dtype=data_dype)
+            elif dim == 0:
+                B_pad = np.zeros([A.shape[0], B.shape[1]], dtype=data_dype)
+            B_pad[:B.shape[0], :B.shape[1]] = B
+        else:
+            B_pad = B
+        if B.shape[dim] > A.shape[dim]:
+            if dim == 1:
+                A_pad = np.zeros([A.shape[0], B.shape[1]], dtype=data_dype)
+            elif dim == 0:
+                A_pad = np.zeros([B.shape[0], A.shape[1]], dtype=data_dype)
+            A_pad[:A.shape[0], :A.shape[1]] = A
+        else:
+            A_pad = A
+
+    elif A.ndim == 3 and B.ndim == 3:
+        if A.shape[dim] > B.shape[dim]:
+            # B_pad = np.zeros(A.shape)  # * np.mean(srcZ_T_re)
+            if dim == 1:
+                B_pad = np.zeros([B.shape[0], A.shape[1], B.shape[2]], dtype=data_dype)
+            elif dim == 0:
+                B_pad = np.zeros([A.shape[0], B.shape[1], B.shape[2]], dtype=data_dype)
+            B_pad[:B.shape[0], :B.shape[1], :B.shape[2]] = B
+        else:
+            B_pad = B
+        if B.shape[dim] > A.shape[dim]:
+            if dim == 1:
+                A_pad = np.zeros([A.shape[0], B.shape[1], A.shape[2]], dtype=data_dype)
+            elif dim == 0:
+                A_pad = np.zeros([B.shape[0], A.shape[1], A.shape[2]], dtype=data_dype)
+            A_pad[:A.shape[0], :A.shape[1], :A.shape[2]] = A
+        else:
+            A_pad = A
+    elif A.ndim == 2 and B.ndim == 3:
+        A = np.expand_dims(A, axis=-1)  # expand dim for added unit
+        if A.shape[dim] > B.shape[dim]:
+            # B_pad = np.zeros(A.shape)  # * np.mean(srcZ_T_re)
+            if dim == 1:
+                B_pad = np.zeros([B.shape[0], A.shape[1], B.shape[2]], dtype=data_dype)
+            elif dim == 0:
+                B_pad = np.zeros([A.shape[0], B.shape[1], B.shape[2]], dtype=data_dype)
+            B_pad[:B.shape[0], :B.shape[1], :B.shape[2]] = B
+        else:
+            B_pad = B
+        if B.shape[dim] > A.shape[dim]:
+            if dim == 1:
+                A_pad = np.zeros([A.shape[0], B.shape[1], A.shape[2]], dtype=data_dype)
+            elif dim == 0:
+                A_pad = np.zeros([B.shape[0], A.shape[1], A.shape[2]], dtype=data_dype)
+            A_pad[:A.shape[0], :A.shape[1], :A.shape[2]] = A
+        else:
+            A_pad = A
+    elif A.ndim == 3 and B.ndim == 2:
+        B = np.expand_dims(B, axis=-1)  # expand dim for added unit
+        if A.shape[dim] > B.shape[dim]:
+            # B_pad = np.zeros(A.shape)  # * np.mean(srcZ_T_re)
+            if dim == 1:
+                B_pad = np.zeros([B.shape[0], A.shape[1], B.shape[2]], dtype=data_dype)
+            elif dim == 0:
+                B_pad = np.zeros([A.shape[0], B.shape[1], B.shape[2]], dtype=data_dype)
+            B_pad[:B.shape[0], :B.shape[1], :B.shape[2]] = B
+        else:
+            B_pad = B
+        if B.shape[dim] > A.shape[dim]:
+            if dim == 1:
+                A_pad = np.zeros([A.shape[0], B.shape[1], A.shape[2]], dtype=data_dype)
+            elif dim == 0:
+                A_pad = np.zeros([B.shape[0], A.shape[1], A.shape[2]], dtype=data_dype)
+            A_pad[:A.shape[0], :A.shape[1], :A.shape[2]] = A
+        else:
+            A_pad = A
+    else:
+        warnings.warn("WARNING: Shape of A is {} and shape of B is {}".format(A.shape, B.shape))
+        A_pad = A
+        B_pad = B
+    del A, B
+    return A_pad, B_pad
+
+
+def registration_within(A, B, rolling_ball_radius, double_gaussian, error_overlap, X, Y, Z, i, localsubjectpath,
+                        extra_figs, high_thres,
+                        Noise2void_or_classical):
+    """
+    This registers within a given X Y Z value. THis registered the optical zoom in the confocal imaging
+        Args:
+        -	A,B: the A and B array to register
+        -   rolling_ball_radius: The rolling ball radius
+        -   error_overlap: The acceptable error limts
+        -   X, Y, Z, i: The values of this slice to use for naming and warnings
+        - localsubjectpath: path to save extra files
+        - extra_figs: set to true to save figures
+        - high_thres: this is for denoising if needed used in Seg_reg_phase
+
+        Returns:
+        -	error : registration error
+        -   shift_reg : registration shift
+        -   Within_Trans : registration transformation
+
+    """
+
+    shift_reg, error, diffphase = skimage.registration.phase_cross_correlation(A, B)
+    Within_Trans = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=0,
+                                                         translation=(shift_reg[1], shift_reg[0]))
+    trans_init_array = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+    # here if NOT identity matrix output a warning
+    trans_init_array_np = np.array(trans_init_array)
+    if not np.array_equal(Within_Trans._inv_matrix, trans_init_array_np):
+        print(
+            "Non identify matrix found shift of {} and {} found for cube X {} Y {} Z {} and file {}, preprocessing file and running registration again".format(
+                shift_reg[0], shift_reg[1], X, Y, Z, i, ))
+        # try segmentation then regisstraataion with phasse correlation
+        name = '{}/Z_{}_X_{}_Y{}_i{}'.format(localsubjectpath, Z, X, Y, i)
+        [shift_reg, error, Within_Trans] = Seg_reg_phase(A, B, rolling_ball_radius, double_gaussian, name, extra_figs,
+                                                         high_thres,
+                                                         Noise2void_or_classical)
+        reg_range_shift = range(round((-1 * (A.shape[0] / 10 * error_overlap))),
+                                round((A.shape[0] / 10 * error_overlap)))
+        if shift_reg[0] not in reg_range_shift or shift_reg[1] not in reg_range_shift:
+            warnings.warn(
+                "WARNING:for cube X {} Y {} Z{} and file {} we get non identity large transform of {}.Setting to idenity".format(
+                    X, Y, Z, i, Within_Trans._inv_matrix))
+            Within_Trans._inv_matrix = trans_init_array
+    del trans_init_array_np, trans_init_array
+    return error, shift_reg, Within_Trans
+
+
+def registration_X(srcY, desY, X_dir, rolling_ball_radius, double_gaussian, error_overlap, X, Y, Z, blank_thres,
+                   localsubjectpath,
+                   extra_figs, high_thres, input_overlap, Noise2void_or_classical, target_overlapX=None):
+    """
+    This registers stiches along X axis
+        Args:
+        -	srcY, desY: the source and destination  array to register
+        -   X_dir: the direction of overlap (left or right)
+        -   rolling_ball_radius: The rolling ball radius
+        -   error_overlap: The acceptable error limts
+        -   X, Y, Z: The values of this slice to use for naming and warnings
+        -  blank_thres: the threhold for ID blank images
+        - localsubjectpath:location to save output figures
+        - extra_figs: Set to true to make additional figures
+        - high_thres: used in feature based ID for denoise
+
+        Optional args:
+        - target_overlapX: calculated overlap
+        - input_overlap: inital guess of overlap
+
+        Returns:
+        -	error: registration error
+        -   shift : registration shift
+        -   target_overlapX  : initial registration guess along X
+
+    """
+
+    if input_overlap is None:
+        if X == 1 and Y == 0 and Z == 0:  # calculate the initial stitch level ONLY for first overlap
+            diroverlap = X_dir  # 'right'
+            [target_overlapX] = feature_CV2(desY, srcY, diroverlap, rolling_ball_radius, double_gaussian, high_thres,
+                                            localsubjectpath,
+                                            input_overlap, Noise2void_or_classical)
+    else:
+        # convert percent in image overlap to number of pixels
+        input_overlap = round(srcY.shape[1] * input_overlap)
+        if X == 1 and Y == 0 and Z == 0:  # calculate the initial stitch level ONLY for first overlap
+            diroverlap = X_dir  # 'right'
+            [target_overlapX] = feature_CV2(desY, srcY, diroverlap, rolling_ball_radius, double_gaussian, high_thres,
+                                            localsubjectpath,
+                                            input_overlap, Noise2void_or_classical)
+            # make sure user defined input of input_overlap, else just use calculated
+            try:
+                input_overlap
+            except NameError:
+                input_overlap = target_overlapX
+            # print warning if user defined overlap and calculated overlap different
+            if target_overlapX in range(round((input_overlap - (input_overlap * error_overlap))),
+                                        round((input_overlap + (input_overlap * error_overlap)))):
+                print("X overlap within {} % of user defined values.".format(error_overlap * 100))
+            else:
+                # print warning
+                warnings.warn(
+                    "WARNING: calculated X overlap of {} not within {} % of user defined overlap of {}. Using user defined overlap.".format(
+                        target_overlapX, (error_overlap * 100), input_overlap))
+                # use user defined value instead
+                target_overlapX = input_overlap
+    # calculate shift on MEAN image --> apply to whole image this helps with noisy images
+    srcY_mean = np.max(srcY, axis=2)  # , dtype=srcY.dtype)
+    desY_mean = np.max(desY, axis=2)  # , dtype=desY.dtype)
+    if X_dir == 'right':
+        shiftXi = -(srcY.shape[1] - abs(target_overlapX))
+    elif X_dir == 'left':
+        shiftXi = abs(target_overlapX)
+    SKI_Trans = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=0,
+                                                      translation=(shiftXi, 0))
+    srcY_Ti = skimage.transform.warp(srcY_mean, SKI_Trans._inv_matrix, mode='edge')
+    if srcY_Ti.max() < 1:  # only if max less then one convert to unit
+        srcY_Ti = skimage.img_as_uint(srcY_Ti, force_copy=False)
+    # srcY_Ti = np.array(srcY_Ti, dtype=srcY_mean.dtype)
+    # get phase correlation for small local change
+    print(target_overlapX)
+    if X_dir == 'right':
+        desY_mean_overlap = desY_mean[:, :(target_overlapX)]
+        srcY_Ti_mean_overlap = srcY_Ti[:, :(target_overlapX)]
+    elif X_dir == 'left':
+        desY_mean_overlap = desY_mean[:, -target_overlapX:]
+        srcY_Ti_mean_overlap = srcY_Ti[:, -target_overlapX:]
+
+    del desY_mean, srcY_mean
+    shift, error, diffphase = skimage.registration.phase_cross_correlation(desY_mean_overlap,
+                                                                           srcY_Ti_mean_overlap)
+    print('X original error of {}'.format(error))
+    print('X diff phase of {}'.format(diffphase))
+    # find if BLANK squares added together, if so redefine shift to zero
+    if desY_mean_overlap.max() < blank_thres * desY_mean_overlap.mean() and srcY_Ti_mean_overlap.max() < blank_thres * srcY_Ti_mean_overlap.mean():
+        print("Blank image overlap found at Y {} Z {} for X {} and X {}, setting to default overlap".format(Y, Z, X,
+                                                                                                            (X - 1)))
+        blank_overlap = True
+        shift = np.array([0, 0])
+        if extra_figs:
+            src_overlap_name = localsubjectpath + 'X=' + str(X) + 'Y=' + str(Y) + 'Z=' + str(
+                Z) + '_source_overlap_X_blank.png'
+            make_figure(srcY_Ti_mean_overlap, src_overlap_name)
+            des_overlap_name = localsubjectpath + 'X=' + str(X) + 'Y=' + str(Y) + 'Z=' + str(
+                Z) + '_destination_overlap_X_blank.png'
+            make_figure(desY_mean_overlap, des_overlap_name)
+    else:
+        blank_overlap = False
+    # give warning if shift is more then error_overlap of target_overlapX
+    # print warning if user defined overlap and calculated overlap different
+    X_range_shift = range(round((-1 * (target_overlapX * error_overlap))), round((target_overlapX * error_overlap)))
+    if shift[0] not in X_range_shift or shift[1] not in X_range_shift:
+        print("Sparse image found with shift of {} and {}. Using filtered phase shift for overlap registration.".format(
+            shift[1], shift[0]))
+        if extra_figs:
+            src_overlap_name_sp = localsubjectpath + 'X=' + str(X) + 'Y=' + str(Y) + 'Z=' + str(
+                Z) + '_source_overlap_X_sparse.png'
+            make_figure(srcY_Ti_mean_overlap, src_overlap_name_sp)
+            des_overlap_name_sp = localsubjectpath + 'X=' + str(X) + 'Y=' + str(Y) + 'Z=' + str(
+                Z) + '_destination_overlap_X_sparse.png'
+            make_figure(desY_mean_overlap, des_overlap_name_sp)
+        # try segmentation followed by phase correlation
+        name = '{}/Z_{}_X_{}_Y{}'.format(localsubjectpath, Z, X, Y)
+        [shift, error, Within_Trans] = Seg_reg_phase(desY_mean_overlap, srcY_Ti_mean_overlap, rolling_ball_radius,
+                                                     double_gaussian, name,
+                                                     extra_figs, high_thres, Noise2void_or_classical)
+        print('X segmented data error of {}'.format(error))
+        # NOW IF STILL NOT WITHIN 10%... use defalt
+        if shift[0] not in X_range_shift or shift[1] not in X_range_shift:
+            # print warning
+            warnings.warn(
+                "WARNING: image overlap of Z {} Y {} and X {} and X {} not within error. Overlap varry by {} and {} pixels. changing to defult overlaap".format(
+                    Z, Y, (X - 1), X, shift[1], shift[0]))
+            shift = np.array([0, 0])
+    del srcY_Ti, SKI_Trans, desY_mean_overlap, srcY_Ti_mean_overlap
+    return error, shift, target_overlapX, blank_overlap
+
+
+def registration_Y(srcZ, desZ, Y_dir, rolling_ball_radius, double_gaussian, error_overlap, X, Y, Z, blank_thres,
+                   localsubjectpath,
+                   extra_figs, high_thres, input_overlap, Noise2void_or_classical, target_overlapY=None):
+    """
+    This registers stiches along X axis
+        Args:
+        -	srcZ, desZ: the source and destination  array to register
+        -   Y_dir: the direction of overlap (top or bottom)
+        -   rolling_ball_radius: The rolling ball radius
+        -   error_overlap: The acceptable error limts
+        -   X, Y, Z: The values of this slice to use for naming and warnings
+        -  blank_thres: the threhold for ID blank images
+        - localsubjectpath:location to save output figures
+        - extra_figs: Set to true to make additional figures
+        - high_thres: used in feature based ID for denoise
+        Optional args:
+        - target_overlapY: calculated overlap
+        - input_overlap: input guess of overlap
+
+        Returns:
+        -	error: registration error
+        -   shift : registration shift
+        -   target_overlapY  : initial registration guess along Y
+
+    """
+    if input_overlap is None:
+        if Y == 1 and Z == 0:  # calculate the initial stitch level ONLY for first overlap
+            if Y_dir == 'top':
+                diroverlap = 'down'
+            elif Y_dir == 'bottom':
+                diroverlap = 'up'
+            [target_overlapY] = feature_CV2(desZ, srcZ, diroverlap, rolling_ball_radius, double_gaussian, high_thres,
+                                            localsubjectpath,
+                                            input_overlap, Noise2void_or_classical)
+    else:
+        # convert percent in image overlap to number of pixels
+        input_overlap = round(srcZ.shape[0] * input_overlap)
+        # pad in the Y
+        dim = 1
+        [srcZ, desZ] = zero_pad(srcZ, desZ, dim)
+        if Y == 1 and Z == 0:  # calculate the initial stitch level ONLY for first overlap
+            if Y_dir == 'top':
+                diroverlap = 'down'
+            elif Y_dir == 'bottom':
+                diroverlap = 'up'
+            [target_overlapY] = feature_CV2(desZ, srcZ, diroverlap, rolling_ball_radius, double_gaussian, high_thres,
+                                            localsubjectpath,
+                                            input_overlap, Noise2void_or_classical)
+            # print warning if user defined overlap and calculated overlap different
+            if target_overlapY in range(round((input_overlap - (input_overlap * error_overlap))),
+                                        round((input_overlap + (input_overlap * error_overlap)))):
+                print("Y overlap within {} of user defined values.".format(error_overlap))
+            else:
+                # print warning
+                warnings.warn(
+                    "WARNING: calculated Y overlap of {} not within {} % of user defined overlap of {}. Using user defined overlap.".format(
+                        target_overlapY, (error_overlap * 100), input_overlap))
+                target_overlapY = input_overlap
+    # calculate shift on MEAN image --> apply to whole image this helps with noisy images
+    srcZ_mean = np.max(srcZ, axis=2)  # , dtype=srcZ.dtype)
+    desZ_mean = np.max(desZ, axis=2)  # , dtype=desZ.dtype)
+    if Y_dir == 'top':
+        shiftYi = -(srcZ.shape[0] - abs(target_overlapY))
+    elif Y_dir == 'bottom':
+        shiftYi = abs(target_overlapY)
+    SKI_Trans = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=0,
+                                                      translation=(0, shiftYi))
+    srcZ_Ti = skimage.transform.warp(srcZ_mean, SKI_Trans._inv_matrix, mode='edge')
+    if np.max(srcZ_Ti) < 1:  # only if max less then one convert to unit
+        srcZ_Ti = skimage.img_as_uint(srcZ_Ti, force_copy=False)
+    else:
+        srcZ_Ti = np.array(srcZ_Ti, dtype=srcZ_mean.dtype)
+    # get phase correlation for small local change
+    if Y_dir == 'top':
+        desZ_mean_overlap = desZ_mean[:(target_overlapY), :]
+        srcZ_Ti_mean_overlap = srcZ_Ti[:(target_overlapY), :]
+    elif Y_dir == 'bottom':
+        desZ_mean_overlap = desZ_mean[-(target_overlapY):, :]
+        srcZ_Ti_mean_overlap = srcZ_Ti[-(target_overlapY):, :]
+    del desZ_mean, srcZ_mean
+    shift, error, diffphase = skimage.registration.phase_cross_correlation(desZ_mean_overlap, srcZ_Ti_mean_overlap)
+    print('Y original error of {}'.format(error))
+    print('Y original diff phase of {}'.format(diffphase))
+    # find if BLANK squares added together, if so redefine shift to zero
+    if desZ_mean_overlap.max() < blank_thres * desZ_mean_overlap.mean() and srcZ_Ti_mean_overlap.max() < blank_thres * srcZ_Ti_mean_overlap.mean():
+        print("Blank image overlap found at Z {} for y {} and Y {}, setting to default overlap".format(Z, Y,
+                                                                                                       (Y - 1)))
+        shift = np.array([0, 0])
+        if extra_figs:
+            src_overlap_name_blk = localsubjectpath + 'Y=' + str(Y) + 'Z=' + str(Z) + '_source_overlap_Y_blank.png'
+            make_figure(srcZ_Ti_mean_overlap, src_overlap_name_blk)
+            des_overlap_name_blk = localsubjectpath + 'Y=' + str(Y) + 'Z=' + str(Z) + '_destination_overlap_Y_blank.png'
+            make_figure(desZ_mean_overlap, des_overlap_name_blk)
+    Y_range_shift = range(round((-1 * (target_overlapY * error_overlap))),
+                          round((target_overlapY * error_overlap)))
+    if shift[0] not in Y_range_shift or shift[1] not in Y_range_shift:
+        print("Sparse image found with shift of {} and {}. Using filtered phase shift for overlap registration.".format(
+            shift[0], shift[1]))
+        if extra_figs:
+            src_overlap_name_spY = localsubjectpath + 'Y=' + str(Y) + 'Z=' + str(Z) + '_source_overlap_Y_sparse.png'
+            make_figure(srcZ_Ti_mean_overlap, src_overlap_name_spY)
+            des_overlap_name_spY = localsubjectpath + 'Y=' + str(Y) + 'Z=' + str(
+                Z) + '_destination_overlap_Y_sparse.png'
+            make_figure(desZ_mean_overlap, des_overlap_name_spY)
+        # try segmentation and regisstration
+        name = '{}/Z_{}_X_{}_Y{}'.format(localsubjectpath, Z, X, Y)
+        [shift, error, Within_Trans] = Seg_reg_phase(desZ_mean_overlap, srcZ_Ti_mean_overlap, rolling_ball_radius,
+                                                     double_gaussian, name,
+                                                     extra_figs, high_thres, Noise2void_or_classical)
+        print('Y segmented data error of {}'.format(error))
+        # NOW IF STILL NOT WITHIN 10%... use defalt
+        if shift[0] not in Y_range_shift or shift[1] not in Y_range_shift:
+            # print warning
+            warnings.warn(
+                "WARNING: image overlap of Z {} for Y {} and Y {} not within error. Overlap varry by {} and {} pixels. Changing to default overlap".format(
+                    Z, Y, (Y - 1), shift[0], shift[1]))
+            shift = np.array([0, 0])
+    del desZ_mean_overlap, srcZ_Ti_mean_overlap, SKI_Trans, srcZ_Ti
+    return error, shift, target_overlapY
+
+
+# In case of boolaen segmentation, the dice loss is equal to 2 x dot product of the flattened arrays,
+# divided by the total volume of both masks.
+def dice_loss(y_true, y_pred):
+    y_true = y_true.flatten()
+    y_pred = y_pred.flatten()
+    intersection = y_true.dot(y_pred)
+    union = sum(y_true) + sum(y_pred)
+    dice = 2 * intersection / union
+    return dice
+
+
+def rmsdiff(source, source_transformed, destination):
+    import ants
+    source_ant = ants.from_numpy(data=source)
+    destination_ant = ants.from_numpy(data=destination)
+    # register 2 datasets
+    mytx = ants.registration(fixed=destination_ant, moving=source_ant, initial_transform=None, outprefix="test",
+                             dimension=2)  # “Similarity”
+    # apply transfrom to unsegmented data
+    p2_reg_ants = ants.apply_transforms(fixed=bar_ant, moving=p2_ant, transformlist=mytx['fwdtransforms'])
+    # convert back to numpy
+    p2_reg = p2_reg_ants.numpy()
+
+    ants.image_mutual_information(source_ant, destination_ant)
+
+    # todo .... find a way to compapre Z matching methods....
+
+    from sklearn.metrics import mean_squared_error
+    from math import sqrt
+
+    rms = sqrt(mean_squared_error(im1, im2))
+
+    "Calculate the root-mean-square difference between two images"
+    from PIL import Image
+    from matplotlib import cm
+    im1_im = Image.fromarray(np.uint8(cm.gist_earth(im1) * 255))
+    im2_im = Image.fromarray(np.uint8(cm.gist_earth(im2) * 255))
+
+    diff = ImageChops.difference(im1, im2)
+
+    diff = np.abs(im1 - im2)
+
+    h = np.histogram(diff)  # diff.histogram()
+    sq = (value * (idx ** 2) for idx, value in enumerate(h))
+    sum_of_squares = sum(sq)
+    rms = math.sqrt(sum_of_squares / float(im1.size[0] * im1.size[1]))
+
+    # or does this evaluate?
+    # or what if we try: sum of squared intensity differences (SSD): -->
+
+    return rms
+
+
+def zca_whitening_matrix(X):
+    """
+    Function to compute ZCA whitening matrix (aka Mahalanobis whitening).
+    INPUT:  X: [M x N] matrix.
+        Rows: Variables
+        Columns: Observations
+    OUTPUT: ZCAMatrix: [M x M] matrix
+    """
+    # Covariance matrix [column-wise variables]: Sigma = (X-mu)' * (X-mu) / N
+    sigma = np.cov(X, rowvar=True)  # [M x M]
+    # Singular Value Decomposition. X = U * np.diag(S) * V
+    U, S, V = np.linalg.svd(sigma)
+    # U: [M x M] eigenvectors of sigma.
+    # S: [M x 1] eigenvalues of sigma.
+    # V: [M x M] transpose of U
+    # Whitening constant: prevents division by zero
+    epsilon = 1e-5
+    # ZCA Whitening matrix: U * Lambda * U'
+    ZCAMatrix = np.dot(U, np.dot(np.diag(1.0 / np.sqrt(S + epsilon)), U.T))  # [M x M]
+    return ZCAMatrix
+
+
+def auto_detect_180(destination_feature, source_feature, localsubjectpath):
+    """
+    This finds if 180 is found or not. This uses elastix.
+    Documentation of elastix at: https://elastix.lumc.nl/doxygen/index.html and http://elastix.bigr.nl/wiki/index.php/Par0013
+    input:
+    destination_feature: destination image
+    source_feature: source image
+    localsubjectpath: path to save files
+
+    output:
+    new_angle_rad: angle either 180 or 0 if 180 rotation detected
+    """
+    # rotate image by theta_rad, set to 180 or 0 in Z registration code
+    # source_feature = skimage.transform.rotate(source_feature, math.degrees(theta_rad)) #here we want to use segmented image b/c intensity of blood vessesl isnt meaninful
+    # convert data to work with elastix software package
+    destination_feature = destination_feature.astype(np.float32)
+    source_feature = source_feature.astype(np.float32)
+    fixed_image_feature = itk.image_from_array(destination_feature)
+    moving_image_feature = itk.image_from_array(source_feature)
+    # define parameter file
+    parameter_object = itk.ParameterObject.New()
+    default_rigid_parameter_map = parameter_object.GetDefaultParameterMap('rigid')
+    parameter_object.AddParameterMap(default_rigid_parameter_map)
+    parameter_object.SetParameter("Transform", "EulerTransform")  # this is rigid
+    parameter_object.SetParameter("Optimizer",
+                                  "StandardGradientDescent")  # full search # this allows me to pick step size what about evolutionary strategy? FullSearch, ConjugateGradient, ConjugateGradientFRPR, QuasiNewtonLBFGS, RSGDEachParameterApart, SimultaneousPerturbation, CMAEvolutionStrategy.
+    parameter_object.SetParameter("Registration", "MultiResolutionRegistration")
+    parameter_object.SetParameter("Metric",
+                                  "AdvancedKappaStatistic")  # "AdvancedNormalizedCorrelation") #AdvancedNormalizedCorrelation") #maybe AdvancedMattesMutualInformation
+    parameter_object.SetParameter("FixedInternalImagePixelType", "float")
+    parameter_object.SetParameter("MovingInternalImagePixelType", "float")
+    parameter_object.SetParameter("FixedImageDimension", "2")
+    parameter_object.SetParameter("MovingImageDimension", "2")
+    parameter_object.SetParameter("FixedImagePyramid", "FixedRecursiveImagePyramid")  # smooth and downsample
+    parameter_object.SetParameter("MovingImagePyramid", "MovingRecursiveImagePyramid")  # smooth and downsample
+    parameter_object.SetParameter("NumberOfResolutions", "6")  # high resoltuiions b/c large shifts
+    parameter_object.SetParameter("DefaultPixelValue", "0")  # this is b/c background is 0
+    parameter_object.SetParameter("ImageSampler",
+                                  "Grid")  # want full b/c random sampler would give different metric to compare results so full or grid should work, full is really slow
+    parameter_object.SetParameter("NewSamplesEveryIteration",
+                                  "false")  # want false b/c random sampler would give different metric to compare results
+    parameter_object.SetParameter("Scales", "1.0")  # this is so rotation and translation treated equally
+    parameter_object.SetParameter("UseDirectionCosines", "false")
+    parameter_object.SetParameter("AutomaticTransformInitialization", "true")
+    parameter_object.SetParameter("AutomaticTransformInitializationMethod", "GeometricalCenter")
+    parameter_object.SetParameter("UseComplement", "false")
+    parameter_object.SetParameter("WriteResultImage", "true")
+    parameter_object.SetParameter("MaximumNumberOfIterations", "500")
+    parameter_object.SetParameter("MaximumNumberOfSamplingAttempts", "3")
+
+    # note: This is something specific to our scope and probably would not generalize to data from other people. I would just rotate them manually for each dataset.
+    # rotate image 180 degrees
+    # source_denoise_180 = skimage.transform.rotate(source_denoise, 180)
+    # source_denoise_180 = source_denoise_180.astype(np.float32)
+    # moving_image_denoise_180 = itk.image_from_array(source_denoise_180)
+    source_feature_180 = skimage.transform.rotate(source_feature, 180)
+    source_feature_180 = source_feature_180.astype(np.float32)
+    moving_image_feature_180 = itk.image_from_array(source_feature_180)
+    # get registration metirc for 180 and original data
+    result_image, result_transform_parameters = itk.elastix_registration_method(fixed_image=fixed_image_feature,
+                                                                                moving_image=moving_image_feature,
+                                                                                parameter_object=parameter_object,
+                                                                                log_to_console=True, log_to_file=True,
+                                                                                output_directory=localsubjectpath)  # '/Users/kaleb/Documents/CSHL/2d_3D_linear_reg/')
+    # load localsubjectpath /elastix.log file
+    file1 = open(localsubjectpath + "elastix.log", "r")
+    string = file1.read()
+    m1 = re.search('Final metric value  = (\d+.\d+)', string)
+    Final_metric_value = float(m1.group(1))
+    file1.close()
+    # get denoise (with feaure-- multimodal?) 180 rotation registration
+    result_image_180, result_transform_parameters_180 = itk.elastix_registration_method(fixed_image=fixed_image_feature,
+                                                                                        moving_image=moving_image_feature_180,
+                                                                                        parameter_object=parameter_object,
+                                                                                        log_to_console=True,
+                                                                                        log_to_file=True,
+                                                                                        output_directory=localsubjectpath)  # '/Users/kaleb/Documents/CSHL/2d_3D_linear_reg/')
+    file2 = open(localsubjectpath + "elastix.log", "r")
+    string = file2.read()
+    m2 = re.search('Final metric value  = (\d+.\d+)', string)
+    Final_metric_value_180 = float(m2.group(1))
+    file2.close()
+    # if 180 rotaoin better:
+    if Final_metric_value_180 > Final_metric_value:  # for AdvancedKappaStatistic higher value is better (1.0 = prefect)
+        result_image_good = result_image_180
+        result_transform_parameters_good = result_transform_parameters_180
+        warnings.warn(message="WARNING: 180 degree rotation detected")
+        add_theta = 180
+    else:
+        result_image_good = result_image
+        result_transform_parameters_good = result_transform_parameters
+        add_theta = 0
+    # now get rotation and translations measurements
+    # pm0 = result_transform_parameters_good.GetParameterMap(0)
+    # center = [float(p) for p in pm0['CenterOfRotationPoint']]  # todo take this as center of rotatiion
+    # elx_parameters = [float(p) for p in pm0['TransformParameters']]  # todo take this as translation and degree values?
+    # Y_shift =   #these aare in number of pixels (sould be -150 for test case)
+    # X_shift =   #these aare in number of pixels (shoould be -100 for test case)
+    # elx_angle=  #this  is in radians (should be 5 for test case)
+    # new_angle_rad = elx_angle + math.radians(add_theta) #this  is in radians both 180 or not roation and elastix rotation
+    # shift[0] = Y_shift  #Y direction, axis 0
+    # shift[1] = X_shift  #X direction, axis 1
+    new_angle_rad = math.radians(add_theta)
+
+    return new_angle_rad
+
+
+# CODE FOR fourier_mellin
+import sys
+import math
+import cv2
+import numpy as np
+from matplotlib import pyplot as plt
+import scipy.ndimage.interpolation as ndii
+import pprint
+import time
+
+# global constants
+RE_IDX = 0
+IM_IDX = 1
+ROWS_AXIS = 0
+COLS_AXIS = 1
+polarMode = "spline"
+noiseMode = "none"  # "gaussian", "s&p", "none"
+noiseIntensity = {'sigma': 2, 'mean': 0, 'whiteThreshold': 0.01, 'blackThreshold': 0.99}
+resultsComparation = False
+
+
+# this function will calculates parameters for log polar transformation
+# (center of transformation, angle step and log base)
+def computeLogPolarParameters(img):
+    # Step 1 - Get center of the transformation
+    centerTrans = [math.floor((img.shape[ROWS_AXIS] + 1) / 2), math.floor((img.shape[COLS_AXIS] + 1) / 2)]
+    # Step 2 - Estimate dimensions of final image after discrete log-polar transformation
+    # num of columns = log(radius)
+    # num of rows = angle in radius (0, 2pi)
+    maxDiff = np.maximum(centerTrans, np.asarray(img.shape) - centerTrans)
+    maxDistance = ((maxDiff[0] ** 2 + maxDiff[1] ** 2) ** 0.5)
+    dimsLogPolar = [0, 0]
+    dimsLogPolar[COLS_AXIS] = img.shape[COLS_AXIS]
+    dimsLogPolar[ROWS_AXIS] = img.shape[ROWS_AXIS]
+    # Step 2.1 - Estimate log base
+    logBase = math.exp(math.log(maxDistance) / dimsLogPolar[COLS_AXIS])
+    # Step 3 - Calculate step for angle in log polar coordinates
+    angleStep = (1.0 * math.pi) / dimsLogPolar[ROWS_AXIS]
+    return (centerTrans, angleStep, logBase)
+
+
+# converts image to its log polar representation
+# returns the log polar representation and log base
+def convertToLogPolar(img, centerTrans, angleStep, logBase, mode="nearest"):
+    if mode == "nearest":
+        # Step 1 - Initialize transformed image
+        transformedImage = np.zeros(img.shape, dtype=img.dtype)
+        # Step 2 - Apply reverse log polar transformation
+        for radius in range(
+                img.shape[COLS_AXIS]):  # start with radius, because calculating exponential power is time consuming
+            actRadius = logBase ** radius
+            for angle in range(img.shape[ROWS_AXIS]):
+                anglePi = angle * angleStep
+                # calculate euclidian coordinates (source: https://en.wikipedia.org/wiki/Log-polar_coordinates)
+                row = int(centerTrans[ROWS_AXIS] + actRadius * math.sin(anglePi))
+                col = int(centerTrans[COLS_AXIS] + actRadius * math.cos(anglePi))
+                # copy pixel from the location to log polar image
+                if 0 <= row < img.shape[ROWS_AXIS] and 0 <= col < img.shape[COLS_AXIS]:
+                    transformedImage[angle, radius] = img[row, col]
+
+        return transformedImage
+    else:
+        print("Base: " + str(logBase))
+        # create matrix with angles
+        anglesMap = np.zeros(img.shape, dtype=np.float64)
+        # each column has 0 in its first row and -pi in its last row
+        anglesVector = -np.linspace(0, np.pi, img.shape[0], endpoint=False)
+        # initialize it by columns using the same vector
+        anglesMap.T[:] = anglesVector
+        # create matrix with radii
+        radiusMap = np.zeros(img.shape, dtype=np.float64)
+        # each line contains a vector with numbers from  in (0, cols) to power logBase
+        radiusVector = np.power(logBase, np.arange(img.shape[1], dtype=np.float64)) - 1.0
+        # initialize it by rows using the same vector
+        radiusMap[:] = radiusVector
+        # calculate x coordinates (source: https://en.wikipedia.org/wiki/Log-polar_coordinates)
+        x = radiusMap * np.sin(anglesMap) + centerTrans[1]
+        # calculate y coordinates (source: https://en.wikipedia.org/wiki/Log-polar_coordinates)
+        y = radiusMap * np.cos(anglesMap) + centerTrans[0]
+        # initialize final image
+        outputImg = np.zeros(img.shape)
+        # use spline interpolation to map pixels from original image to calculated coordinates
+        ndii.map_coordinates(img, [x, y], output=outputImg)
+        return outputImg
+
+
+# computes phase correlation and returns position of pixel with highest value (row, column)
+def phaseCorrelation(img_orig, img_transformed):
+    # Step 3.1 - Initialize complex conjugates for original image and magnitudes
+    orig_conj = np.copy(img_orig)
+    orig_conj[:, :, IM_IDX] = -orig_conj[:, :, IM_IDX]
+    orig_mags = cv2.magnitude(img_orig[:, :, RE_IDX], img_orig[:, :, IM_IDX])
+    img_trans_mags = cv2.magnitude(img_transformed[:, :, RE_IDX], img_transformed[:, :, IM_IDX])
+    # Step 3.2 - Do deconvolution
+    # multiplication compex numbers ===> (x + yi) * (u + vi) = (xu - yv) + (xv + yu)i
+    # deconvolution ( H* x G ) / |H x G|
+    realPart = (orig_conj[:, :, RE_IDX] * img_transformed[:, :, RE_IDX] - orig_conj[:, :, IM_IDX] * img_transformed[:,
+                                                                                                    :, IM_IDX]) / (
+                           orig_mags * img_trans_mags)
+    imaginaryPart = (orig_conj[:, :, RE_IDX] * img_transformed[:, :, IM_IDX] + orig_conj[:, :,
+                                                                               IM_IDX] * img_transformed[:, :,
+                                                                                         RE_IDX]) / (
+                                orig_mags * img_trans_mags)
+    result = np.dstack((realPart, imaginaryPart))
+    result_idft = cv2.idft(result)
+    # Step 3.3 - Find Max value (angle and scaling factor)
+    result_mags = cv2.magnitude(result_idft[:, :, RE_IDX], result_idft[:, :, IM_IDX])
+    return np.unravel_index(np.argmax(result_mags), result_mags.shape)
+
+
+# reads image, runs FFT and returns FFT image + its magnitude spectrum
+def readImage(img):
+    imgData = cv2.imread(img, 0)  # 0 means Grayscale
+    imgFft, imgFftShifted = calculateFft(imgData)  # FFT of the image
+    imgMags = cv2.magnitude(imgFftShifted[:, :, RE_IDX], imgFftShifted[:, :, IM_IDX])
+    return (imgData, imgFftShifted, imgMags)
+
+
+# applies highpass filter and returns the image
+# H(col, row) = (1.0 - X(col, row)) * (2.0 - X(col, row)), row and col have to be transformed to range <-pi/2, pi/2>
+# X(valX, valY) = cos(pi * valX) * cos(pi * valY), both valX and valY in range <-pi/2, pi/2>
+def prepareHighPassFilter(img):
+    pi2 = math.pi / 2.0
+    # transform number of rows to <-pi/2,pi/2> range and calculate cos for each element
+    rows = np.cos(np.linspace(-pi2, pi2, img.shape[0]))
+    # transform number of cols to <-pi/2,pi/2> range and calculate cos for each element
+    cols = np.cos(np.linspace(-pi2, pi2, img.shape[1]))
+    # creates matrix the whole image
+    x = np.outer(rows, cols)
+    return (1.0 - x) * (2.0 - x)
+
+
+# Central point for running FFT
+def calculateFft(img):
+    imgTmp = np.float32(img)
+    # FFT of the image
+    imgFft = cv2.dft(imgTmp, flags=cv2.DFT_COMPLEX_OUTPUT)
+    # the FFT shift is needed in order to center the results
+    imgFftShifted = np.fft.fftshift(imgFft)
+    return (imgFft, imgFftShifted)
+
+
+# main script
+def fourier_mellin(argv):
+    # paper: https://ieeexplore.ieee.org/document/1562722
+    timeStart = time.time()
+    # Step 1 - Apply FFT on both images and get their magnitude spectrums
+    # image (we are looking for), lets call it original
+    imgOriginal, imgOriginalFft, imgOriginalMags = readImage(argv[1])
+    # image (we are searching in), lets call it transformed
+    imgTransformed, imgTransformedFft, imgTransformedMags = readImage(argv[2])
+
+    # Step 2 - Apply highpass filter on their magnitude spectrums
+    highPassFilter = prepareHighPassFilter(imgOriginalMags)
+    imgOriginalMagsFilter = imgOriginalMags * highPassFilter
+    imgTransformedMagsFilter = imgTransformedMags * highPassFilter
+
+    # Step 3 - Convert magnitudes both images to log-polar coordinates
+    # Step 3.1 - Precompute parameters (both images have the same dimensions)
+    centerTrans, angleStep, logBase = computeLogPolarParameters(imgOriginalMagsFilter)
+    imgOriginalLogPolar = convertToLogPolar(imgOriginalMagsFilter, centerTrans, angleStep, logBase, polarMode)
+    imgTransformedLogPolar = convertToLogPolar(imgTransformedMagsFilter, centerTrans, angleStep, logBase, polarMode)
+
+    # Step 3.1 - Apply FFT on magnitude spectrums in log polar coordinates (in this case, not using FFT shift as it leads to computing [180-angle] results)
+    imgOriginalLogPolarComplex = cv2.dft(np.float32(imgOriginalLogPolar), flags=cv2.DFT_COMPLEX_OUTPUT)
+    imgTransformedLogPolarComplex = cv2.dft(np.float32(imgTransformedLogPolar), flags=cv2.DFT_COMPLEX_OUTPUT)
+
+    # Step 4 - Apply phase corelation on both images (FFT applied on log polar images) to retrieve rotation (angle) and scale factor
+    angle, scale = phaseCorrelation(imgOriginalLogPolarComplex, imgTransformedLogPolarComplex)
+    # Step 4.1 Convert to degrees based on formula in paper (26) and adjust it to (-pi/2, pi/2) range
+    angleDeg = -(float(angle) * 180.0) / imgOriginalLogPolarComplex.shape[0]
+    if angleDeg < - 45:
+        angleDeg += 180
+    else:
+        if angleDeg > 90.0:
+            angleDeg -= 180
+
+    # Step 4.2 Calculate scale factor based on formula in paper (25)
+    scaleFactor = logBase ** scale
+
+    # Step 5 - Apply rotation and scaling on transformed image
+    transformMatrix = cv2.getRotationMatrix2D((centerTrans[0], centerTrans[1]), angleDeg, scaleFactor)
+    imgTransformedNew = cv2.warpAffine(imgTransformed, transformMatrix,
+                                       (imgTransformed.shape[1], imgTransformed.shape[0]))
+
+    # Step 6 - Apply phase corelation on both images to retrieve translation
+    # Step 6.1 Apply FFT to newly created transformed image
+    imgTransformedNewFft, imgTransformedNewftShifted = calculateFft(imgTransformedNew)
+    # Step 6.2 - Use phase corelation to get translation coordinates
+    y, x = phaseCorrelation(imgTransformedNewftShifted, imgOriginalFft)
+    # Step 6.3 Apply translation on the final image
+    if x > imgOriginal.shape[0] // 2:
+        x -= imgOriginal.shape[0]
+    if y > imgOriginal.shape[1] // 2:
+        y -= imgOriginal.shape[1]
+
+    translationMatrix = np.float32([[1, 0, -x], [0, 1, -y]])
+    imgFinal = cv2.warpAffine(imgTransformedNew, translationMatrix, (imgTransformed.shape[1], imgTransformed.shape[0]))
+    timeEnd = time.time()
+
+    # Step 7 - Return final results (rotation, scale factor, translation)
+    print("Angle = " + str(angleDeg) + " Deg")
+    print("Scale = " + str(scaleFactor))
+    print("Translation")
+    print("X = " + str(-x))
+    print("Y = " + str(-y))
+    print("Time = " + str(timeEnd - timeStart))
+
+    if resultsComparation:
+        plt.subplot(221), plt.imshow(imgOriginal, cmap='gray')
+        plt.subplot(222), plt.imshow(imgTransformed, cmap='gray')
+        plt.subplot(223), plt.imshow(imgOriginal - imgFinal, cmap='bwr')
+        plt.subplot(224), plt.imshow(imgFinal, cmap='gray')
+        plt.show()
+    else:
+        plt.subplot(521), plt.imshow(imgOriginal, cmap='gray')
+        plt.subplot(522), plt.imshow(imgTransformed, cmap='gray')
+        plt.subplot(523), plt.imshow(imgOriginalMagsFilter, cmap='gray')
+        plt.subplot(524), plt.imshow(imgTransformedMagsFilter, cmap='gray')
+        plt.subplot(525), plt.imshow(imgOriginalLogPolar, cmap='gray')
+        plt.subplot(526), plt.imshow(imgTransformedLogPolar, cmap='gray')
+        plt.subplot(527), plt.imshow(imgTransformedNew, cmap='gray')
+        plt.subplot(528), plt.imshow(imgOriginal - imgFinal, cmap='bwr')
+        plt.subplot(529), plt.imshow(imgFinal, cmap='gray')
+        plt.show()
+    return angleDeg, scaleFactor, x, y
+
+
+def phase_corr_rotation(destination, source, degree_thres, theta_rad):
+    """
+    This finds the rotation angle if small
+
+    Input:
+    destination: destination image
+    source: source image
+    degree_thres: degree threshold for warning messages
+    theta_rad: amount to initially rotate if given
+
+    Output:
+    new_angle_rad: output angle to rotation in radians
+    """
+
+    # todo try this method -- should be able to find 180 degree rotatioins?: https://github.com/polakluk/fourier-mellin/blob/master/script.py
+    # fourier_mellin(argv):
+
+    # rotate source by theta
+    source_theta = skimage.transform.rotate(source, math.degrees(theta_rad))
+
+    myconstraints = {
+        "scale": [1, 0]  # this is a scale of 1 without and stardev
+        # todo add  degree_thres as a constriant here???
+    }
+    result = ird.imreg.similarity(destination, source_theta,
+                                  constraints=myconstraints)
+    theta = abs(result["angle"])
+
+    lst = [0, 180]  # this is list of angles to return closest one to measured valve
+    idx = (np.abs(lst - theta)).argmin()
+    new_angle_180_0 = lst[idx]
+    if new_angle_180_0 == 180:
+        warnings.warn(message="WARNING: 180 degree rotation detected")
+    # if outside threshold
+    if np.abs((new_angle_180_0 - theta)) > degree_thres:
+        # if outside threshold set theta to 0, b/c setting to 180 or 0 might lead to false postive if not strong evidance of 180 rotation
+        new_angle = 0
+        warnings.warn(
+            message="WARNING: Z rotation degree shift larger then {} from {}, angle of {} detected. Setting angle to {}".format(
+                degree_thres, new_angle_180_0, np.abs((new_angle_180_0 - theta)), new_angle))
+    else:
+        new_angle = theta
+    print('Z Theta is {}'.format(new_angle))
+    # convert angle to radians
+    new_angle_rad = math.radians(new_angle)
+    return new_angle_rad
+
+
+def elastix_2D_registration(destination, source, nonlinear_trans):
+    """
+    This fund non-linear (bspline) or linear (similarity) transform between source and destination data. THis uses elastix registtration
+
+    Input:
+    destination: destination image, ideally feature based image
+    source: source image, ideally feature based image
+    nonlinear_trans: This is set to true to find on-linear transformation, false for linear transformation
+
+    Output:
+    transformation: elastix tranfomation matrix
+    """
+
+    # todo try elastic on failed 2d to 2d registratoin also try optical flow, feature based???? try phase correaltion on raw data? try prewhitten b4 denosie phase correaltion?
+    # _deps/elx-src/Common/OpenCL/ITKimprovements/itkOpenCLContext.cxx(387): itkOpenCL warning.
+    # Warning: in function: Create; Name: OpenCLContext (0x555557873e00)
+    # Details: OpenCLContext::Create(method:4):CL_INVALID_PLATFORM
+    # this gets tranformation parameters: GetTransformParameterMap()
+    # (TransformParameters θ_x , θ_y , θ_z , t_x , t_y , t_z) --> in mm???
+
+    # convert data to work with elastix software package
+    destination_feature = destination.astype(np.float32)
+    source_feature = source.astype(np.float32)
+    fixed_image_feature = itk.image_from_array(destination_feature)
+    moving_image_feature = itk.image_from_array(source_feature)
+    # define parameter file
+    parameter_object = itk.ParameterObject.New()
+    if nonlinear_trans:
+        default_bspline_parameter_map = parameter_object.GetDefaultParameterMap('bspline')
+        parameter_object.AddParameterMap(default_bspline_parameter_map)
+        parameter_object.SetParameter("Transform",
+                                      "BSplineTransform")  # this is non-linear(use (SplineKernelTransform) for feautres
+    else:
+        default_rigid_parameter_map = parameter_object.GetDefaultParameterMap('rigid')
+        parameter_object.AddParameterMap(default_rigid_parameter_map)
+        parameter_object.SetParameter("Transform", "SimilarityTransform")  # this is scale, rottation, and translation
+    parameter_object.SetParameter("Optimizer",
+                                  "StandardGradientDescent")  # full search # this allows me to pick step size what about evolutionary strategy? FullSearch, ConjugateGradient, ConjugateGradientFRPR, QuasiNewtonLBFGS, RSGDEachParameterApart, SimultaneousPerturbation, CMAEvolutionStrategy.
+    parameter_object.SetParameter("Registration", "MultiResolutionRegistration")
+    parameter_object.SetParameter("Metric",
+                                  "AdvancedKappaStatistic")  # "AdvancedNormalizedCorrelation") #AdvancedNormalizedCorrelation") #maybe AdvancedMattesMutualInformation
+    parameter_object.SetParameter("FixedInternalImagePixelType", "float")
+    parameter_object.SetParameter("MovingInternalImagePixelType", "float")
+    parameter_object.SetParameter("FixedImageDimension", "2")
+    parameter_object.SetParameter("MovingImageDimension", "2")
+    parameter_object.SetParameter("FixedImagePyramid", "FixedRecursiveImagePyramid")  # smooth and downsample
+    parameter_object.SetParameter("MovingImagePyramid", "MovingRecursiveImagePyramid")  # smooth and downsample
+    parameter_object.SetParameter("NumberOfResolutions", "6")  # high resoltuiions b/c large shifts
+    parameter_object.SetParameter("DefaultPixelValue", "0")  # this is b/c background is 0
+    parameter_object.SetParameter("ImageSampler",
+                                  "Grid")  # want full b/c random sampler would give different metric to compare results so full or grid should work, full is really slow
+    parameter_object.SetParameter("NewSamplesEveryIteration",
+                                  "false")  # want false b/c random sampler would give different metric to compare results
+    # parameter_object.SetParameter("Scales", "1.0")  # this is so rotation and translation treated equally
+    parameter_object.SetParameter("UseDirectionCosines", "false")
+    parameter_object.SetParameter("AutomaticTransformInitialization", "true")
+    parameter_object.SetParameter("AutomaticTransformInitializationMethod", "GeometricalCenter")
+    parameter_object.SetParameter("UseComplement", "false")
+    parameter_object.SetParameter("WriteResultImage", "true")
+    parameter_object.SetParameter("MaximumNumberOfIterations", "500")
+    parameter_object.SetParameter("MaximumNumberOfSamplingAttempts", "3")
+
+    # get registration metirc for 180 and original data
+    result_image, result_transform_parameters = itk.elastix_registration_method(fixed_image=fixed_image_feature,
+                                                                                moving_image=moving_image_feature,
+                                                                                parameter_object=parameter_object,
+                                                                                log_to_console=True, log_to_file=True,
+                                                                                output_directory=localsubjectpath)
+
+    return result_transform_parameters
+
+
+def part_in_whole_registration(whole_image, template):
+    """
+    This finds where a given template is located within a given whole image. Works for 2D or 3D images
+
+    Input:
+    whole_image: The whole image
+    template: The template image
+
+    Output:
+    whole_image_template: The whole image that corresponds to the template
+    XYZ_temp = the corrdinates of where the template is located within the whole image
+
+    see: https://docs.opencv.org/3.4/de/da9/tutorial_template_matching.html
+    """
+
+    # machine learning approach? http://proceedings.mlr.press/v80/michaelis18a/michaelis18a.pdf
+
+    # https: // scikit - image.org / docs / dev / auto_examples / features_detection / plot_template.html  # sphx-glr-auto-examples-features-detection-plot-template-py
+
+    # get max value center point
+    # ij = np.unravel_index(np.argmax(result), result.shape)
+    # x, y = ij[::-1] #this is center X Y value
+    # htemp, wtemp = template.shape
+    # rect = plt.Rectangle((x, y), wtemp, htemp, edgecolor='r', facecolor='none')
+
+    # Run registration with no rotations
+    px_z = field_z - stack_z + stack.shape[0] / 2 - 0.5
+    mini_stack = stack[max(0, int(round(px_z - rigid_zrange))): int(round(
+        px_z + rigid_zrange))]
+    corrs = np.stack([skimage.feature.match_template(whole_image, template, pad_input=True) for s in
+                      mini_stack])
+    smooth_corrs = scipy.ndimage.gaussian_filter(corrs, 0.7)
+
+    # Get results
+    min_z = max(0, int(round(px_z - rigid_zrange)))
+    min_y = int(round(0.05 * stack.shape[1]))
+    min_x = int(round(0.05 * stack.shape[2]))
+    mini_corrs = smooth_corrs[:, min_y:-min_y, min_x:-min_x]
+    rig_z, rig_y, rig_x = np.unravel_index(np.argmax(mini_corrs), mini_corrs.shape)
+
+    # Rewrite coordinates with respect to original z
+    rig_z = (min_z + rig_z + 0.5) - stack.shape[0] / 2
+    rig_y = (min_y + rig_y + 0.5) - stack.shape[1] / 2
+    rig_x = (min_x + rig_x + 0.5) - stack.shape[2] / 2
+
+    # XYZ_temp =
+
+    # whole_imaage_template =
+
+    return whole_imaage_template, XYZ_temp
+
+
+# todo prewhitten data before phase correatlion?
+
+
+def crop_Z(image, list_manual_Z_crop, Z, extra_figs, localsubjectpath):
+    """
+    This crops a given image with defined y_start, y_end, x_start, x_end values. These are read in from list_manual_Z_crop.Can only crop along X and Y
+        Args:
+        -	image: the image to apply cropping to this can be 2D or 3D
+        -   list_manual_Z_crop: the path to the excel file with cropping parameters for a given Z
+        -   Z: Z value to search for given cropping parameters
+        -   extra_figs: this is true to make figures, false to not make figures
+        - localsubjectpath: this is the path location to save figures
+
+        Returns:
+        -	image_crop: this is the cropped image. After cropping image is zero padded. this will match 2d or 3D dimensions in image
+    """
+    # if list_manual_Z_crop is given then crop image before registration below
+    if np.any(list_manual_Z_crop) is not None:
+        # load data
+        npcsv = np.genfromtxt(list_manual_Z_crop, delimiter=',', encoding='utf8', dtype=np.str)
+        # get Z values --> find Z in first row somewhere  --> add .lower to can look at captial or not
+        namaes = np.char.lower(npcsv[0])  # names is first row
+        values = np.zeros([npcsv.shape[0] - 1, npcsv.shape[1]])
+        for i in range(1, npcsv.shape[0]):
+            vi = i - 1
+            values[vi][:] = list(map(int, npcsv[i]))
+        # find row with Z, 'Y_start', 'Y_end', 'X_start', 'X_end'
+        zstr = 'z'
+        Zrow = np.flatnonzero(np.core.defchararray.find(namaes, zstr) != -1)
+        if Zrow.size <= 0:
+            warnings.warn(message="WARNING:No Z colum found in list_manual_Z_crop csv file")
+        YSstr = 'y_start'
+        y_start_row = np.flatnonzero(np.core.defchararray.find(namaes, YSstr) != -1)
+        if y_start_row.size <= 0:
+            warnings.warn(message="WARNING:No y_start colum found in list_manual_Z_crop csv file")
+        YEstr = 'y_end'
+        y_end_row = np.flatnonzero(np.core.defchararray.find(namaes, YEstr) != -1)
+        if y_end_row.size <= 0:
+            warnings.warn(message="WARNING:No y_end colum found in list_manual_Z_crop csv file")
+        XSstr = 'x_start'
+        x_start_row = np.flatnonzero(np.core.defchararray.find(namaes, XSstr) != -1)
+        if x_start_row.size <= 0:
+            warnings.warn(message="WARNING:No x_start colum found in list_manual_Z_crop csv file")
+        XEstr = 'x_end'
+        x_end_row = np.flatnonzero(np.core.defchararray.find(namaes, XEstr) != -1)
+        if x_end_row.size <= 0:
+            warnings.warn(message="WARNING:No x_end colum found in list_manual_Z_crop csv file")
+        Z_values = values[:, Zrow[0]]
+        XS_values = values[:, x_start_row[0]]
+        XE_values = values[:, x_end_row[0]]
+        YS_values = values[:, y_start_row[0]]
+        YE_values = values[:, y_end_row[0]]
+        # check if Z  are in list
+        if np.any(Z == Z_values):
+            src_Z_index = np.where(Z_values == Z)
+            Y_startS = YS_values[src_Z_index]
+            Y_endS = YE_values[src_Z_index]
+            X_startS = XS_values[src_Z_index]
+            X_endS = XE_values[src_Z_index]
+        else:  # no crop in  image
+            Y_startS = 0
+            Y_endS = image.shape[0] - 1
+            X_startS = 0
+            X_endS = image.shape[1] - 1
+        if image.ndim == 3:
+            for i in range(image.shape[2]):
+                image_crop_one = image[Y_startS:Y_endS, X_startS:X_endS, i]
+                image_crop_one = np.expand_dims(image_crop_one, axis=-1)
+                if i != 0:
+                    image_crop = np.concatenate((image_crop, image_crop_one), axis=2)
+                else:
+                    image_crop = image_crop_one
+        if image.ndim == 2:
+            image_crop = image[Y_startS:Y_endS, X_startS:X_endS]
+        # pad cropped image with zeros until size of image
+        dim = 1
+        [image, image_crop] = zero_pad(image, image_crop, dim)
+        dim = 0
+        [image, image_crop] = zero_pad(image, image_crop, dim)
+        if extra_figs:
+            cropped_name = localsubjectpath + 'Z=' + str(Z) + '_cropped_image.png'
+            make_figure(image_crop, cropped_name)
+    else:
+        image_crop = image
+    return image_crop
+
+
+# todo add if phase correlatioin fails (based on??) then do feature based registration instead of phase correlation --> in case not mounted properly
+
+def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_feature, count_shiftZ, shiftZ, angleZ,
+                   apply_transform, rigid_2d3d, error_overlap, find_rot, degree_thres, denoise_all, max_Z_proj_affine,
+                   seq_dir, maxZshift_percent, Z, list_180_Z_rotation, auto_180_Z_rotation, localsubjectpath,
+                   Z_reg_denoise_or_feature):
+    """
+    This registers 2D to 3D along Z axis
+        Args:
+        -   src3d: raw source data to transform
+        -	src3d_feature, des3d_feature: the source and destination feature map, used to register rigid
+        -   src3d_denoise, des3d_denoise: the source and destination deionised data, used to affine
+        -   count_shiftZ: the number of countZ to load from saved array if needed
+        -   shiftZ, angleZ: saved shifitZ data translation and angle
+        -   apply_transform: True if run saved transformations, false otherwise
+        -   rigid_2d3d: True if run rigid registration, false otherwise
+        -   error_overlap,
+        -   find_rot: set to true if find rotation, other wise false
+        -   degree_thres,
+        -   denoise_all: set to ture to apply to all images, false if max projection used
+        -   max_Z_proj_affine: set to true for max projection
+        -   seq_dir = this is 'top' if POS1 is above POS 0 and 'bottom' if POS 1 is below POS 0
+        -   maxZshift_percent: "This is used place limits on the Z plane to Z plane translation. This is the percent of the image allowed for translation, if above this threhold set to 0 translation. The default is 25% of the image. (ex:--maxZshift_percent=25)(default:25)")
+        -   Z: current Z value for file names
+        -   list_180_Z_rotation: if user defined list of images to rotate 180 degrees
+        -   auto_180_Z_rotation: Set to true to automatically find the 180 degree rotation
+        -   localsubjectpath: file path to save files
+        -   Z_reg_denoise_or_feature: this is set to 'feaure' or 'denoise'. This registeres eaither denosie or freautre input based on this input
+
+        Returns:
+        -	src3d_T_feature: source feature file shifted with registration values
+        -   des3d_feature : destination feature file
+        -   count_shiftZ, shiftZ:  registration shift
+        -   src3d_T: source raw file shifted with registration values
+
+    """
+
+    # todo remove these extra names
+    src3d_denoise_crop = src3d_denoise
+    des3d_denoise_crop = des3d_denoise
+    src3d_feature_crop = src3d_feature
+    des3d_feature_crop = des3d_feature
+    # todo remove these extra names
+
+    # todo nice ppt on optial flow" https://github.com/aplyer/gefolki/blob/master/COREGISTRATION.pdf
+    Z_max_shift0 = src3d.shape[0] * (maxZshift_percent / 100)
+    Z_max_shift1 = src3d.shape[1] * (maxZshift_percent / 100)
+    if denoise_all:  # todo --> do we want this? or ALWAYS use mean??
+        if max_Z_proj_affine:
+            src3d_denoise_one = np.max(src3d_denoise_crop, axis=2)  # todo change back to max?
+            des3d_denoise_one = np.max(des3d_denoise_crop, axis=2)
+        else:
+            if seq_dir == 'top':
+                src3d_denoise_one = src3d_denoise_crop[:, :, 0]
+                des3d_denoise_one = des3d_denoise_crop[:, :, -1]
+            elif seq_dir == 'bottom':
+                src3d_denoise_one = src3d_denoise_crop[:, :, -1]
+                des3d_denoise_one = des3d_denoise_crop[:, :, 0]
+            else:
+                warnings.warn(message="WARNING:opticalZ_dir variable not defined correctly")
+    else:
+        src3d_denoise_one = src3d_denoise_crop
+        des3d_denoise_one = des3d_denoise_crop
+    error_allZ = []
+    if Z_reg_denoise_or_feature == 'denoise':
+        src3d_reg = src3d_denoise_one
+        des3d_reg = des3d_denoise_one
+    elif Z_reg_denoise_or_feature == 'feature':
+        src3d_reg = src3d_feature_crop
+        des3d_reg = des3d_feature_crop
+    if list_180_Z_rotation is not None:
+        if Z in list_180_Z_rotation:
+            # deffine theta as 180 degrees for transformation
+            theta = 180
+            # set auto_180_Z_rotation for this Z to false if true
+            auto_180_Z_rotation = False
+        else:
+            theta = 0
+    else:
+        theta = 0
+    theta_rad = math.radians(theta)
+    if auto_180_Z_rotation:
+        new_angle_rad = auto_detect_180(des3d_reg, src3d_reg, localsubjectpath)
+        theta_rad = new_angle_rad
+    if rigid_2d3d:
+        if apply_transform:
+            error = 0  # not calculated
+            shift = shiftZ[count_shiftZ]
+            angle_rad = angleZ[count_shiftZ]
+            count_shiftZ = count_shiftZ + 1
+        else:
+            # find rotation
+            if find_rot:
+                angle_rad = phase_corr_rotation(des3d_reg, src3d_reg, degree_thres,
+                                                theta_rad)
+            else:
+                angle_rad = 0.0
+            # basic phase corr only
+            shift, error, diffphase = skimage.registration.phase_cross_correlation(des3d_reg,
+                                                                                   src3d_reg)
+            if np.abs(shift[0]) > Z_max_shift1 or np.abs(shift[1]) > Z_max_shift0:
+                warnings.warn(
+                    message="WARNING: Z shift exceeded limits, shift X = {} shift y = {}. Seeting Z translation to zero.".format(
+                        shift[1], shift[0]))
+                shift[0] = 0
+                shift[1] = 0
+            print('Z Phase translation is {}'.format(shift))
+            shiftZ.append(shift)
+            angleZ.append(angle_rad)
+        error_allZ.append(error)
+        # calculate OVERALL SHIFT from inital guess + phase correlations
+        SKI_Trans_all_Z = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=(angle_rad + theta_rad),
+                                                                translation=(shift[1], shift[0]))
+        # apply to image in src3d feature map
+        src3d_T_feature = skimage.transform.warp(src3d_feature, SKI_Trans_all_Z._inv_matrix, order=0, mode='edge',
+                                                 preserve_range=True)
+        # this chnage back to unit 8 dtype from float 64, this and preserve range are needed to keep shift as binary image
+        src3d_T_feature = src3d_T_feature.astype(src3d_feature.dtype)
+        # loop comprehension to apply to all images in src3d
+        src3d_T = [
+            skimage.transform.warp(src3d[:, :, i], SKI_Trans_all_Z._inv_matrix, mode='edge')
+            for i in range(src3d.shape[2])]
+        if np.max(src3d_T) < 1:  # only if max less then one convert to unit
+            src3d_T = skimage.img_as_uint(src3d_T, force_copy=False)
+        else:
+            src3d_T = np.array(src3d_T, dtype=src3d.dtype)
+        src3d_T = np.transpose(src3d_T, axes=[1, 2, 0])
+        # loop comprehension to apply to all images in src3d_denoise
+        if denoise_all:
+            src3d_T_denoise = [skimage.transform.warp(src3d_denoise[:, :, i], SKI_Trans_all_Z._inv_matrix, mode='edge')
+                               for i in range(src3d_denoise.shape[2])]
+            if np.max(src3d_T_denoise) < 1:  # only if max less then one convert to unit
+                src3d_T_denoise = skimage.img_as_uint(src3d_denoise, force_copy=False)
+            else:
+                src3d_T_denoise = np.array(src3d_T_denoise, dtype=src3d_denoise.dtype)
+            src3d_T_denoise = np.transpose(src3d_T_denoise, axes=[1, 2, 0])
+        else:
+            # APPLY SHIFT to denoise value
+            src3d_T_denoise = skimage.transform.warp(src3d_denoise, SKI_Trans_all_Z._inv_matrix, order=0,
+                                                     mode='edge', preserve_range=True)
+            src3d_T_denoise = src3d_T_denoise.astype(src3d_denoise.dtype)
+    else:  # --- Compute the optical flow
+        if apply_transform:
+            error = 0  # not calculated
+            [v_shift, u_shift] = shiftZ[count_shiftZ]
+            angle_rad = angleZ[count_shiftZ]
+            rotation_trans = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=angle_rad,
+                                                                   translation=(0, 0))
+            count_shiftZ = count_shiftZ + 1
+        else:
+            # find rotation
+            if find_rot:
+                angle_rad = phase_corr_rotation(des3d_reg, src3d_reg, degree_thres, theta_rad)
+            else:
+                angle_rad = 0.0
+            rotation_trans = skimage.transform.SimilarityTransform(matrix=None, scale=1,
+                                                                   rotation=(angle_rad + theta_rad),
+                                                                   translation=(0, 0))
+            # phase correlation here --> then motion based
+            shift, error, diffphase = skimage.registration.phase_cross_correlation(des3d_reg,
+                                                                                   src3d_reg)
+            if np.abs(shift[0]) > Z_max_shift1 or np.abs(shift[1]) > Z_max_shift0:
+                warnings.warn(
+                    message="WARNING: Z shift exceeded limits, shift X = {} shift y = {}. Seeting Z translation to zero.".format(
+                        shift[1], shift[0]))
+                shift[0] = 0
+                shift[1] = 0
+            print('Z Phase translation is {}'.format(shift))
+            # calculate OVERALL SHIFT from inital guess + phase correlations
+            Tran_Z_phase = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=(angle_rad + theta_rad),
+                                                                 translation=(shift[1], shift[0]))
+            # apply to image in src3d_denoise to use to calculate V and U
+            src3d_denoise_phase_shift = skimage.transform.warp(src3d_reg, Tran_Z_phase._inv_matrix, order=0,
+                                                               mode='edge', preserve_range=True)
+            src3d_denoise_phase_shift = src3d_denoise_phase_shift.astype(src3d_reg.dtype)
+            v, u = skimage.registration.optical_flow_tvl1(des3d_reg, src3d_denoise_phase_shift)
+            # add phase and motion correction together
+            v_shift = v + -(shift[0])
+            u_shift = u + -(shift[1])
+            # check V and U are correctly added for all images
+            # --- Use the estimated optical flow for registration
+            nrT, ncT = src3d_denoise_phase_shift.shape
+            row_coordsT, col_coordsT = np.meshgrid(np.arange(nrT), np.arange(ncT), indexing='ij')
+            src3d_denoise_phase_shift_raw = skimage.transform.warp(src3d_denoise_phase_shift,
+                                                                   np.array([row_coordsT + v, col_coordsT + u]),
+                                                                   order=0, mode='nearest', preserve_range=True)
+            src3d_reg_check = skimage.transform.warp(src3d_reg,
+                                                     np.array([row_coordsT + v_shift, col_coordsT + u_shift]), order=0,
+                                                     mode='nearest', preserve_range=True)
+            testzeros = src3d_denoise_phase_shift_raw - src3d_reg_check
+            if testzeros.max() != testzeros.min():
+                warnings.warn(
+                    # todo this seems to happen if image is slected for 180 degree rotation via input
+                    message="WARNING: optical registration not added correctly to phase correlation for Z = {}".format(
+                        Z))
+            shiftZ.append([v_shift, u_shift])
+            angleZ.append((angle_rad + theta_rad))
+        error_allZ.append([error])
+        # --- Use the estimated optical flow for registration
+        nr, nc = src3d_feature.shape
+        row_coords, col_coords = np.meshgrid(np.arange(nr), np.arange(nc), indexing='ij')
+        # apply to image in src3d feature map
+        src3d_feature_rot = skimage.transform.warp(src3d_feature, rotation_trans._inv_matrix, order=0, mode='edge',
+                                                   preserve_range=True)
+        src3d_feature_rot = src3d_feature_rot.astype(src3d_feature.dtype)
+        src3d_T_feature = skimage.transform.warp(src3d_feature_rot,
+                                                 np.array([row_coords + v_shift, col_coords + u_shift]), order=0,
+                                                 mode='nearest', preserve_range=True)
+        # this chnage back to unit 8 dtype from float 64, this and preserve range are needed to keep shift as binary image
+        src3d_T_feature = src3d_T_feature.astype(src3d_feature.dtype)
+        # loop comprehension to apply to all images in src3d
+        src3d_T_rot = [
+            skimage.transform.warp(src3d[:, :, i], rotation_trans._inv_matrix, order=0, mode='edge',
+                                   preserve_range=True) for i
+            in range(src3d.shape[2])]
+        if np.max(src3d_T_rot) < 1:  # only if max less then one convert to unit
+            src3d_T_rot = skimage.img_as_uint(src3d_T_rot, force_copy=False)
+        else:
+            src3d_T_rot = np.array(src3d_T_rot, dtype=src3d.dtype)
+        src3d_T_rot = np.transpose(src3d_T_rot, axes=[1, 2, 0])
+        src3d_T = [skimage.transform.warp(src3d_T_rot[:, :, i], np.array([row_coords + v_shift, col_coords + u_shift]),
+                                          mode='nearest') for i in range(src3d.shape[2])]
+        if np.max(src3d_T) < 1:  # only if max less then one convert to unit
+            src3d_T = skimage.img_as_uint(src3d_T, force_copy=False)
+        else:
+            src3d_T = np.array(src3d_T, dtype=src3d.dtype)
+        src3d_T = np.transpose(src3d_T, axes=[1, 2, 0])
+        # apply to denoise
+        if denoise_all:
+            src3d_T_denoise_rot = [
+                skimage.transform.warp(src3d_denoise[:, :, i], rotation_trans._inv_matrix, order=0, mode='edge',
+                                       preserve_range=True) for i in range(src3d_denoise.shape[2])]
+            if np.max(src3d_T_denoise_rot) < 1:  # only if max less then one convert to unit
+                src3d_T_denoise_rot = skimage.img_as_uint(src3d_denoise, force_copy=False)
+            else:
+                src3d_T_denoise_rot = np.array(src3d_T_denoise_rot, dtype=src3d_denoise.dtype)
+            src3d_T_denoise_rot = np.transpose(src3d_T_denoise_rot, axes=[1, 2, 0])
+            src3d_T_denoise = [
+                skimage.transform.warp(src3d_T_denoise_rot, np.array([row_coords + v_shift, col_coords + u_shift]),
+                                       order=0, mode='nearest', preserve_range=True) for i in
+                range(src3d_denoise.shape[2])]
+            if np.max(src3d_T_denoise) < 1:  # only if max less then one convert to unit
+                src3d_T_denoise = skimage.img_as_uint(src3d_denoise, force_copy=False)
+            else:
+                src3d_T_denoise = np.array(src3d_T_denoise, dtype=src3d_denoise.dtype)
+            src3d_T_denoise = np.transpose(src3d_T_denoise, axes=[1, 2, 0])
+        else:
+            src3d_T_denoise_rot = skimage.transform.warp(src3d_denoise, rotation_trans._inv_matrix, order=0,
+                                                         mode='edge',
+                                                         preserve_range=True)
+            src3d_T_denoise_rot = src3d_T_denoise_rot.astype(src3d_denoise.dtype)
+            src3d_T_denoise = skimage.transform.warp(src3d_T_denoise_rot,
+                                                     np.array([row_coords + v_shift, col_coords + u_shift]), order=0,
+                                                     mode='nearest', preserve_range=True)
+            # this chnage back to unit 8 dtype from float 64, this and preserve range are needed to keep shift as binary image
+            src3d_T_denoise = src3d_T_denoise.astype(src3d_denoise.dtype)
+
+    return src3d_T, src3d_T_feature, src3d_T_denoise, count_shiftZ, shiftZ, error_allZ
+
+
+"""
+
+def HPF(image, window_size):
+    '''
+    Calculates HPF and removes low frequencies of window size
+    Input:
+      image: Image to remove lower frequencies
+      window_size: size of frequencies to remove
+    Returns:
+      image_HPF: image without lower frequency changes
+    '''
+    # fft to convert the image to freq domain
+    f = np.fft.fft2(image)
+    # shift the center
+    fshift = np.fft.fftshift(f)
+    rows, cols = image.shape
+    crow, ccol = rows / 2, cols / 2
+    # remove the low frequencies by masking with a rectangular window of size 60x60
+    # High Pass Filter (HPF)
+    # remove low freq
+    window_size_half = window_size / 2
+    fshift[int(crow - window_size_half):int(crow + window_size_half),
+    int(ccol - window_size_half):int(ccol + window_size_half)] = 0
+    fshift[int(crow - window_size_half):int(crow + window_size_half),
+    int(ccol - window_size_half):int(ccol + window_size_half)] = 0
+    # shift back (we shifted the center before)
+    f_ishift = np.fft.ifftshift(fshift)
+    # inverse fft to get the image back
+    img_back = np.fft.ifft2(f_ishift)
+    # get rid of complex part
+    img_back = np.abs(img_back)
+    # noramlize
+    #norm = (img_back - np.min(img_back)) / (np.max(img_back) - np.min(img_back))
+    image_HPF = img_back #norm * 255
+    '''
+    # OR WHAT IF WE BAND PASS INSTead????
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from skimage.data import gravel
+    from skimage.filters import difference_of_gaussians, window
+    from scipy.fftpack import fftn, fftshift
+    image = gravel()
+    wimage = image * window('hann', image.shape)  # window image to improve FFT
+    filtered_image = difference_of_gaussians(image, 1, 12)
+    filtered_wimage = filtered_image * window('hann', image.shape)
+    im_f_mag = fftshift(np.abs(fftn(wimage)))
+    fim_f_mag = fftshift(np.abs(fftn(filtered_wimage)))
+    fig, ax = plt.subplots(nrows=2, ncols=2, figsize=(8, 8))
+    ax[0, 0].imshow(image, cmap='gray')
+    ax[0, 0].set_title('Original Image')
+    ax[0, 1].imshow(np.log(im_f_mag), cmap='magma')
+    ax[0, 1].set_title('Original FFT Magnitude (log)')
+    ax[1, 0].imshow(filtered_image, cmap='gray')
+    ax[1, 0].set_title('Filtered Image')
+    ax[1, 1].imshow(np.log(fim_f_mag), cmap='magma')
+    ax[1, 1].set_title('Filtered FFT Magnitude (log)')
+    plt.show()
+    '''
+    return image_HPF
+
+
 def denoise_noise2self(A, FFT_max_gaussian, high_thres):
+    # or maybe noise to voiid is easier to impliment then self supervised blind spot denoise and does same thing? https://github.com/juglab/n2v/blob/master/examples/3D/01_training.ipynb
+
+    # instead of noise to noise use this for only one image; https://www.youtube.com/watch?v=5jpn55ZEZfU --> https://github.com/NVlabs/selfsupervised-denoising
+    # this is worst perfromance then noise 2 noise ... BUT only needs 1 image and needs model of noise
+
     # https://github.com/NVlabs/noise2noise
     # try noise2noise traiing? https://github.com/czbiohub/noise2self or https://github.com/NVlabs/selfsupervised-denoising
-    """
+
     noisy_image = imarray3D_mean_512
     import sys
     sys.path.append("..")
@@ -449,1556 +2556,8 @@ def denoise_noise2self(A, FFT_max_gaussian, high_thres):
                 denoised = np.clip(model(noisy).detach().cpu().numpy()[0, 0], 0, 1).astype(np.float64)
                 best_images.append(denoised)
     denoised = best_images[-1]
-    """
-    return denoised
-
-
-def denoise(A, FFT_max_gaussian, high_thres):
-    """
-    This denoises the data with the optimal of wavlet, TV norm, or non-local means
-        Args:
-        -A Numpy array to be denoised
-        - high_thres: this is the threshold to very high values
-        -FFT_max_gaussian: this if high sigma for difference of gausian
-        Returns:
-        -	denoised: denoised image
-
-    """
-    sigma_est_ori = np.max(skimage.restoration.estimate_sigma(A, multichannel=False))
-    print(f"estimated noise standard deviation = {sigma_est_ori}")
-    # remove extremely high values --> remove hair
-    if (A > (high_thres * A.mean())).any() and A.ndim == 2:
-        warnings.warn(message='High intensity Image detected')
-        high_thres_dec = high_thres / 100
-        # remove whole connected image to this
-        int_thres = (high_thres * A.mean())
-        area_thres = A.shape[1] * (high_thres_dec / 2)
-        A = remove_large_obj(A, area_thres, int_thres, FFT_max_gaussian, high_thres_dec)
-
-    # remove salt and peper with TV norm, wavlet or non-local means
-    # calibrate TV norm
-    parameter_ranges_tv = {'weight': np.arange(0.1, 0.3, 0.5), 'eps': np.arange(0.0002, 0.001, 0.04),
-                           'n_iter_max': np.arange(200, 300, 100), 'multichannel': [False]}
-    _, (parameters_tested_tv, losses_tv) = calibrate_denoiser(A, denoise_tv_chambolle,
-                                                              denoise_parameters=parameter_ranges_tv, extra_output=True)
-    best_parameters_tv = parameters_tested_tv[np.argmin(losses_tv)]
-    denoised_calibrated_tv = _invariant_denoise(A, denoise_tv_chambolle, denoiser_kwargs=best_parameters_tv)
-    print(f'Minimum self-supervised loss TV: {np.min(losses_tv):.4f}')
-    # calibrate wavelet
-    parameter_ranges_wavelet = {'wavelet': ['db1', 'db2', 'haar'], 'convert2ycbcr': [False], 'multichannel': [False],
-                                'rescale_sigma': [True], 'mode': ['soft'], 'method': ['BayesShrink']}
-    _, (parameters_tested_wavelet, losses_wavelet) = calibrate_denoiser(A, denoise_wavelet,
-                                                                        parameter_ranges_wavelet, extra_output=True)
-    best_parameters_wavelet = parameters_tested_wavelet[np.argmin(losses_wavelet)]
-    denoised_calibrated_wavelet = _invariant_denoise(A, denoise_wavelet, denoiser_kwargs=best_parameters_wavelet)
-    print(f'Minimum self-supervised loss wavelet: {np.min(losses_wavelet):.4f}')
-    # calibrate nl means
-    sigma_est = estimate_sigma(A)
-    parameter_ranges_nl = {'h': np.arange(1.15, 2, 5) * sigma_est, 'patch_size': np.arange(5, 10, 5),
-                           'patch_distance': np.arange(6, 10, 5), 'multichannel': [False], 'fast_mode': [True],
-                           'preserve_range': [True]}
-    _, (parameters_tested_nl, losses_nl) = calibrate_denoiser(A, denoise_nl_means, parameter_ranges_nl,
-                                                              extra_output=True)
-    best_parameters_nl = parameters_tested_nl[np.argmin(losses_nl)]
-    denoised_calibrated_nl = _invariant_denoise(A, denoise_nl_means, denoiser_kwargs=best_parameters_nl)
-    print(f'Minimum self-supervised loss NL means: {np.min(losses_nl):.4f}')
-    Low_methods = [np.min(losses_tv), np.min(losses_wavelet), np.min(losses_nl)]
-    if Low_methods.index(min(Low_methods)) == 0:
-        print(f'Method Minimum self-supervised loss is for TV: {np.min(losses_tv):.4f}')
-        denoised1 = denoised_calibrated_tv
-    elif Low_methods.index(min(Low_methods)) == 1:
-        print(f'Method Minimum self-supervised loss is for wavelet: {np.min(losses_wavelet):.4f}')
-        denoised1 = denoised_calibrated_wavelet
-    elif Low_methods.index(min(Low_methods)) == 2:
-        print(f'Method Minimum self-supervised loss is for NL means: {np.min(losses_nl):.4f}')
-        denoised1 = denoised_calibrated_nl
-    else:
-        warnings.warn(message='Optimal denoise failed')
-        denoised1 = A
-
-    denoised1 = skimage.util.img_as_float(denoised1)
-
-    # after salt and peper removed with above then use rolling-ball b/c rolling ball sensitive to salt/pepper.
-    # remove lighting effects with rolling ball -- this removes too much of the data
-    # background = skimage.restoration.rolling_ball(denoised1)
-    # denoised = denoised1 - background
-    # replace with difference of gausian?
-
-    #todo change this? or use rolling ball that works better???
-    denoised = skimage.filters.difference_of_gaussians(denoised1, 1, FFT_max_gaussian)
-
-    # if all values in image are the same value set blank image to zero (should be the case already)
-    if denoised.all() == denoised.max():
-        warnings.warn(message='Blank denoise image')
-
-    # if less then one --> #identify blank image?? does it matter??? why?
-    if np.max(denoised) < 1:
-        denoised = skimage.img_as_uint(denoised, force_copy=False)
 
     return denoised
-
-
-def store_evolution_in(lst):
-    """Returns a callback function to store the evolution of the level sets in
-    the given list. THIS IS USED FOR SEGMENTATION
-    """
-
-    def _store(x):
-        lst.append(np.copy(x))
-
-    return _store
-
-
-def remove_zero_segmntation(A_seg, A, Z):
-    """Find if one segmented image has all zeros, if so then replace. only do this if NOT segmented into ONLY zero and ones
-    """
-    A_seg_ori = np.copy(A_seg)
-    # find if one segmentation has all zeros, if so then replace zero segmentation with lowest segmenation
-    seg_values_max = np.ones(A_seg.max() + 1)
-    seg_values_min = np.ones(A_seg.max() + 1)
-    all_zero_seg = []
-    for count in range(A_seg.max() + 1):
-        seg_values_max[count] = np.max(A[np.where(A_seg == count)])
-        seg_values_min[count] = np.min(A[np.where(A_seg == count)])
-        if seg_values_max[count] == 0 and seg_values_min[count] == 0:
-            all_zero_seg.append(count)
-    for i in range(len(all_zero_seg)):
-        count = all_zero_seg[i]
-        # change seg_values_min to doesnt have count value
-        seg_values_min_new = np.delete(seg_values_min, count, axis=0)
-        replace_value = np.where(seg_values_min == (seg_values_min_new[seg_values_min_new.argmin()]))
-        A_seg[np.where(A_seg == count)] = replace_value
-        if i > 0:
-            warnings.warn(
-                "Warning: Z image {} segmentation detection of multiple segmentation with zero value, this should not hapen ".format(
-                    str(Z)))
-    return A_seg, all_zero_seg
-
-
-def segmentation(A, checkerboard_size, seg_interations, seg_smooth, localsubjectpath, Z, segment_otsu, extra_figs):
-    """
-    This segments the image with chan vase
-        Args:
-        - A Numpy array to be segmented
-        - seg_interations: number of interations for chan_vese segmentation
-        - checkerboard_size:  size of checkerboard for chan_vese segmentatioin
-        -seg_smooth: number of smoothing/iterations for chan_vese segmentation
-        -localsubjectpath: this is where to save figures
-        -Z: Current Z value for figure names
-        -segment_otsu ture to run otsu segmentation, false to run chan_vaase segmentation
-        -extra_figs true to create extra figures
-        Returns:
-        -   A_seg: segmented image
-
-    """
-
-    np.save(localsubjectpath + 'Z=' + str(Z) + '_denoise_for_segmentation', A)
-
-    # do this before segmentaion???
-    # image = cv2.GaussianBlur(image, (5, 5), 0)
-
-    # local otsu? https://scikit-image.org/docs/0.12.x/auto_examples/segmentation/plot_local_otsu.html
-    # issue with local is that most area would just be noise....
-    # img = np.interp(img, (img.min(), img.max()), (0, +255))
-    # img = img.astype(np.uint8)
-    # img = img_as_ubyte(img)
-    # radius = 15
-    # selem = disk(radius)
-    # local_otsu = rank.otsu(img, selem)
-    # A_seg=img >= local_otsu
-    # imshow(img >= local_otsu, cmap=plt.cm.gray)
-    # threshold_global_otsu = threshold_otsu(img)
-    # global_otsu = img >= threshold_global_otsu
-
-    if segment_otsu:
-        # get threshold values for binary image (b/c only 2 classes)
-        thresholds = threshold_multiotsu(A, classes=2)
-        # Using the threshold values, we generate the three regions.
-        A_seg2 = np.digitize(A, bins=thresholds)
-        A_seg2, all_zero_seg = remove_zero_segmntation(A_seg2, A, Z)
-
-        # todo why not make this a for loop that combines all zero groups until increaseing number of classes doesnt give addditional zero group???
-        # todo this is basically trying to find ideal number of clusters????
-        # zero_classes=0
-        # numclass = 3
-        # while zero_classes < 1:
-        # thresholds = threshold_multiotsu(A, classes=numclass) #todo why does this give classes without any data????
-        # A_seg = np.digitize(A, bins=thresholds)
-        # remove empty classes
-        # todo remove empty classes np.histogram(A_seg)
-
-        # if empty classes exits
-        # zero_classes=1
-
-        # numclass = numclass + 1
-        # combine zero segmented into other classes if needed
-        # A_seg3, all_zero_seg = remove_zero_segmntation(A_seg3, A, Z)
-        # set all but highest class value to zero
-        # result = np.where(A_seg3<numclass, 0, A_seg3)
-
-        if len(all_zero_seg):  # use 3 classes if segmentation with all zeros exists
-            thresholds = threshold_multiotsu(A, classes=3)
-            A_seg3 = np.digitize(A, bins=thresholds)
-            # make sure len(np.unique(A_seg)) >= 3
-            if len(np.unique(A_seg3)) >= 3:
-                A_seg3, all_zero_seg = remove_zero_segmntation(A_seg3, A, Z)
-                A_seg = A_seg3
-            else:
-                # todo figure this part out???? --> why is this werid??? ddue to remove large object zeros???
-                print('segmentation has only 2 classes with 3 classes set')
-                thresholds = threshold_multiotsu(A, classes=2)
-                # Using the threshold values, we generate the three regions.
-                A_seg2_raw = np.digitize(A, bins=thresholds)
-                A_seg = A_seg2_raw
-        else:
-            A_seg = A_seg2
-    else:
-        # Initial level set
-        init_ls = skimage.segmentation.checkerboard_level_set(A.shape, checkerboard_size)  # default is 5
-        # List with intermediate results for plotting the evolution
-        evolution = []
-        callback = store_evolution_in(evolution)
-        # smoothing of 3 works
-        A_seg = skimage.segmentation.morphological_chan_vese(A, seg_interations, init_level_set=init_ls,
-                                                             smoothing=seg_smooth,
-                                                             iter_callback=callback)  # here 35 is the number of iterations and smoothing=3 is number of times smoothing applied/iteration
-        # remove segmentation if all zeros
-        A_seg, all_zero_seg = remove_zero_segmntation(A_seg, A, Z)
-        if len(all_zero_seg):  # use otsu 3 classes if zero segmentation exisits
-            warnings.warn(
-                "Warning: Z image {} segmentation of all zeros deteccted, using otsu segmentation with 3 classes ".format(
-                    str(Z)))
-            thresholds = threshold_multiotsu(A, classes=3)
-            A_seg = np.digitize(A, bins=thresholds)
-            A_seg, all_zero_seg = remove_zero_segmntation(A_seg, A, Z)
-
-    # check to make sure segmented values start at zero
-    if A_seg.min() != 0:
-        A_seg = A_seg - A_seg.min()
-        warnings.warn(
-            "Warning: Z image {} segmentation starts at nonzero, shifting to zero segmentation ".format(str(Z)))
-
-    # check to make sure background =0 and segment brain is =1
-    if np.count_nonzero(A_seg == A_seg.max()) > np.count_nonzero(A_seg == 0):
-        # inverse image
-        A_seg = A_seg.max() - A_seg
-        warnings.warn(
-            "Warning: Z image {} segmentation of background labeled high, inverting segmentation ".format(str(Z)))
-
-    # todo remove grid lines in segmented image
-    # A_seg_gray = np.interp(A_seg, (A_seg.min(), A_seg.max()), (0, +255))
-    # change dtype to unit 8 --> so get rid of decimals
-    # A_seg_gray = A_seg_gray.astype(np.uint8)
-    # img_gauss = cv2.GaussianBlur(A_seg_gray, ksize=(13, 13), sigmaX=10)
-    # ret, img_gauss_th = cv2.threshold(img_gauss, thresh=127, maxval=255, type=cv2.THRESH_BINARY)
-    # edges = cv2.Canny(image=img_gauss_th, threshold1=240, threshold2=255)
-    # edges_smoothed = cv2.GaussianBlur(edges, ksize=(5, 5), sigmaX=10)
-    # lines = cv2.HoughLinesP(edges_smoothed, rho=1, theta=1 * np.pi / 180, threshold=40, minLineLength=30, maxLineGap=25)
-    # img_hough_lines_contours = np.ones(A_seg_gray.shape)
-    # line_nos = lines.shape[0]
-    # for i in range(line_nos):
-    #    x_1 = lines[i][0][0]
-    #    y_1 = lines[i][0][1]
-    #    x_2 = lines[i][0][2]
-    #    y_2 = lines[i][0][3]
-    #    cv2.line(A_seg, pt1=(x_1, y_1), pt2=(x_2, y_2), color=(255, 0, 0), thickness=2)
-    # img_hough_lines = A_seg_gray.copy()
-    # img_hough_lines[img_hough_lines_contours == 0] = 255
-
-    if extra_figs:
-        plt.figure()
-        plt.imshow(A)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-        plt.savefig(localsubjectpath + '/Z=' + str(Z) + '_Zplane_before_seg.png', format='png')
-        plt.close()
-        plt.figure()
-        plt.imshow(A_seg)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-        plt.savefig(localsubjectpath + '/Z=' + str(Z) + '_Zplane_after_segmented.png', format='png')
-        plt.close()
-    return A_seg
-
-
-def feature_CV2(destination_raw, source_raw, diroverlap, FFT_max_gaussian, high_thres, localsubjectpath, input_overlap):
-    # todo try https://scikit-image.org/docs/dev/auto_examples/features_detection/plot_brief.html#sphx-glr-auto-examples-features-detection-plot-brief-py
-    # https://scikit-image.org/docs/dev/auto_examples/features_detection/plot_orb.html#sphx-glr-auto-examples-features-detection-plot-orb-py
-    """This finds the overlay given A and B with feature based registration
-        Args:
-        -	source_raw: 3D set of images to overlap source (moving image)
-        -   destination_raw: 3D set of images to overlap target
-        -   diroverlap: the direction of overlap, the direction the source image moves --> up, down, left or right
-        -  FFT_max_gaussian: used for denoise
-        -  high_thres: used for denoise
-        - localsubjectpath: path to save intermediate figures
-        -input_overlap: provided overlap value
-
-        Returns:
-        -	target_overlap: pixel number of overlay
-    """
-    destination_mean = np.max(destination_raw, axis=2)
-    source_mean = np.max(source_raw, axis=2)
-    # denoise image
-    destination_denoise = denoise(destination_mean, FFT_max_gaussian, high_thres)
-    source_denoise = denoise(source_mean, FFT_max_gaussian, high_thres)
-    # define denoised data
-    destination = destination_denoise
-    source = source_denoise
-    # convert to grayscale
-    destination = np.interp(destination, (destination.min(), destination.max()), (0, +255))
-    source = np.interp(source, (source.min(), source.max()), (0, +255))
-    # change dtype to unit 8 --> so get rid of decimals
-    destination = destination.astype(np.uint8)
-    source = source.astype(np.uint8)
-    im_src3d = Image.fromarray(source)
-    im_src3d.save(localsubjectpath + "src3d_denoise.jpeg")
-    im_des3d = Image.fromarray(destination)
-    im_des3d.save(localsubjectpath + "des3d_denoise.jpeg")
-    # Read reference imagw
-    refFilename = '{}/{}'.format(localsubjectpath, 'des3d_denoise.jpeg')
-    imReference = cv2.imread(refFilename, cv2.IMREAD_GRAYSCALE)
-    # Read image to be aligned
-    imFilename = '{}/{}'.format(localsubjectpath, 'src3d_denoise.jpeg')
-    im1 = cv2.imread(imFilename, cv2.IMREAD_GRAYSCALE)
-    # preallocate shift
-    shift = np.zeros(2)
-    MAX_MATCHES = 500
-    GOOD_MATCH_PERCENT = 0.05  # this is 5 percent
-    # Convert images to grayscale
-    im1Gray = im1  # cv2.cvtColor(im1, cv2.COLOR_BGR2GRAY)
-    im2Gray = imReference  # cv2.cvtColor(imReference, cv2.COLOR_BGR2GRAY)
-    # Detect ORB features and compute descriptors.
-    orb = cv2.ORB_create(MAX_MATCHES)
-    keypoints1, descriptors1 = orb.detectAndCompute(im1Gray, None)
-    keypoints2, descriptors2 = orb.detectAndCompute(im2Gray, None)
-    if np.any(descriptors1) == None or np.any(descriptors2) == None:
-        if input_overlap == None:
-            warnings.warn("ERROR: CAN NOT CALCULATE IMAGE OVERLAP PLEASE PROVIDE --input_overlap VALUE")
-        else:
-            warnings.warn("Warning: Can not calculate image overlap, instead using input_overlap value")
-            target_overlap = input_overlap
-    else:
-        # Match features. # get SAME NUMBER OF points for source and destination??? https://www.youtube.com/watch?v=cA8K8dl-E6k
-        # matcher = cv2.DescriptorMatcher_create(cv2.DESCRIPTOR_MATCHER_BRUTEFORCE_SL2)#BRUTEFORCE_HAMMING)
-        # matches = matcher.match(descriptors1, descriptors2, None)
-        # create BFMatcher object
-        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-        # Match descriptors.
-        matches = bf.match(descriptors1, descriptors2)
-        # Sort matches by score
-        matches.sort(key=lambda x: x.distance, reverse=False)
-        # Remove not so good matches
-        numGoodMatches = int(len(matches) * GOOD_MATCH_PERCENT)
-        # matches = matches[:numGoodMatches]
-        # Draw top matches
-        imMatches = cv2.drawMatches(im1, keypoints1, imReference, keypoints2, matches, None)
-        cv2.imwrite(localsubjectpath + "/matches.jpg", imMatches)
-        # Extract location of good matches
-        points1 = np.zeros((len(matches), 2), dtype=np.float32)
-        points2 = np.zeros((len(matches), 2), dtype=np.float32)
-        for i, match in enumerate(matches):
-            points1[i, :] = keypoints1[match.queryIdx].pt
-            points2[i, :] = keypoints2[match.trainIdx].pt
-        # Find Affine Transformation
-        # note swap of order of newpoints here so that image2 is warped to match image1
-        # if not enough points match --> set to input_overlap or warning message to add overlap
-        if points1.shape[0] < 2 or points1.shape[0] < 2:
-            if input_overlap == None:
-                warnings.warn("ERROR: CAN NOT CALCULATE IMAGE OVERLAP PLEASE PROVIDE --input_overlap VALUE")
-            else:
-                warnings.warn("Warning: Can not calculate image overlap, instead using input_overlap value")
-                target_overlap = input_overlap
-        else:
-            m, inliers = cv2.estimateAffinePartial2D(points1, points2)
-            # Use affine transform to warp im2 to match im1
-            height, width = imReference.shape
-            im1Reg = cv2.warpAffine(im1, m, (width, height))
-            shift[0] = m[1, 2]
-            shift[1] = m[0, 2]
-            error = 0  # todo add this?
-            # abs used below so source or destination order doesnt matter and subject from edge to get overlap value
-            if diroverlap == 'up' or diroverlap == 'down':
-                target_overlap = source_raw.shape[0] - abs(int(round(shift[0])))
-            elif diroverlap == 'left' or diroverlap == 'right':
-                target_overlap = source_raw.shape[1] - abs(int(round(shift[1])))
-            else:
-                warnings.warn(
-                    "WARNING: diroverlap not defined correctly, Set to down, up, left or right. Currently set to {} ".format(
-                        diroverlap))
-    return target_overlap,
-
-
-# todo rework this function? maybe replace with combo of other functions?
-# todo if we move denoise to BEFORE registration for X and Y then only need to segment here if fails for X and Y, although denoise still useful if WITHIN registration (add input for this ???)
-# this is used once in registration within, once in registration X, once in registration Y --> this is used when not in range
-
-def Seg_reg_phase(A, B, FFT_max_gaussian, name, extra_figs, high_thres):
-    """
-    This denoise and segments data then finds phase correlation of segmented data. This is used if registration is outside of range when first performed.
-        Args:
-        -	A,B: Numpy array 3D image
-        - FFT_max_gausian: this is for removing low frequency sugested value = 10
-        - name: file name to save
-        - extra_figs: This is true to make extra figures
-        - high_thres:
-        Returns:
-        -	shift_reg: shift of transfrom
-        -	error: error of transfrom
-        -	Within_Trans: Transform
-
-    filt_A = skimage.filters.difference_of_gaussians(A, 1, FFT_max_gaussian)
-    filt_B = skimage.filters.difference_of_gaussians(B, 1, FFT_max_gaussian)
-    A_ant = ants.from_numpy(data=filt_A)
-    B_ant = ants.from_numpy(data=filt_B)
-    # threshold?
-    maskA = ants.get_mask(A_ant)
-    maskB = ants.get_mask(B_ant)
-    """
-    # use band pass filtering to remove shaddow
-    # filt_A = skimage.filters.difference_of_gaussians(A, 1, FFT_max_gaussian)
-    # denoise with wavlet this might not have much of an effect
-    # denoise_A = skimage.restoration.denoise_wavelet(filt_A, multichannel=False, rescale_sigma=True)
-    # set stuff below mean to zero?
-    # low_values_flags = denoise_A < denoise_A.mean()
-    # denoise_A[low_values_flags] = 0
-    # high_values_flags = denoise_A > high_thres * denoise_A.mean()
-    # denoise_A[high_values_flags] = 0
-    # maskA = denoise_A
-    # use band pass filtering to remove shaddow
-    # filt_B = skimage.filters.difference_of_gaussians(B, 1, FFT_max_gaussian)
-    # denoise_B = skimage.restoration.denoise_wavelet(filt_B, multichannel=False, rescale_sigma=True)
-    # set stuff below mean to zero?
-    # low_values_flags = denoise_B < denoise_B.mean()
-    # denoise_B[low_values_flags] = 0
-    # high_values_flags = denoise_B > high_thres * denoise_B.mean()
-    # denoise_B[high_values_flags] = 0
-    # maskB = denoise_B
-
-    # denoise data
-    maskA = denoise(A, FFT_max_gaussian, high_thres)
-    maskB = denoise(B, FFT_max_gaussian, high_thres)
-
-    # segment data --> issue is chan vase segmnetation fails with little data.... does ostu?
-    # what about log trnasform? and postive value shift?
-    # A_seg=segmentation(A, checkerboard_size, seg_interations, seg_smooth, localsubjectpath, Z, segment_otsu, extra_figs)
-    # A_seg = segmentation(A, checkerboard_size, seg_interations, seg_smooth, localsubjectpath, Z, segment_otsu, extra_figs)
-
-    # shift segmented data
-    shift_reg, error, diffphase = skimage.registration.phase_cross_correlation(maskA, maskB)
-    print('Filtered diff phase of {}'.format(diffphase))
-    Within_Trans = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=0,
-                                                         translation=(shift_reg[1], shift_reg[0]))
-    if extra_figs:
-        plt.figure()
-        plt.imshow(maskA)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-        plt.savefig(name + 'overlay_mask_A.png', format='png')
-        plt.close()
-        plt.figure()
-        plt.imshow(maskB)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-        plt.savefig(name + 'overlay_mask_B.png', format='png')
-        plt.close()
-
-    return shift_reg, error, Within_Trans
-
-
-def zero_pad(A, B, dim):
-    """
-    This makes arrays the same size (zero pad) along dim
-        Args:
-        -	A,B: the A and B array to make the same size
-        -   dim: dim overlap only accepts 0 or 1
-
-        Returns:
-        -	A_pad,B_pad: arrays zero padded
-
-    """
-
-    # remove extra dimensions
-    A = np.squeeze(A)
-    B = np.squeeze(B)
-
-    data_dype = A.dtype
-
-    if A.ndim == 2 and B.ndim == 2:
-        if A.shape[dim] > B.shape[dim]:
-            # B_pad = np.zeros(A.shape)  # * np.mean(srcZ_T_re)
-            if dim == 1:
-                B_pad = np.zeros([B.shape[0], A.shape[1]], dtype=data_dype)
-            elif dim == 0:
-                B_pad = np.zeros([A.shape[0], B.shape[1]], dtype=data_dype)
-            B_pad[:B.shape[0], :B.shape[1]] = B
-        else:
-            B_pad = B
-        if B.shape[dim] > A.shape[dim]:
-            if dim == 1:
-                A_pad = np.zeros([A.shape[0], B.shape[1]], dtype=data_dype)
-            elif dim == 0:
-                A_pad = np.zeros([B.shape[0], A.shape[1]], dtype=data_dype)
-            A_pad[:A.shape[0], :A.shape[1]] = A
-        else:
-            A_pad = A
-
-    elif A.ndim == 3 and B.ndim == 3:
-        if A.shape[dim] > B.shape[dim]:
-            # B_pad = np.zeros(A.shape)  # * np.mean(srcZ_T_re)
-            if dim == 1:
-                B_pad = np.zeros([B.shape[0], A.shape[1], B.shape[2]], dtype=data_dype)
-            elif dim == 0:
-                B_pad = np.zeros([A.shape[0], B.shape[1], B.shape[2]], dtype=data_dype)
-            B_pad[:B.shape[0], :B.shape[1], :B.shape[2]] = B
-        else:
-            B_pad = B
-        if B.shape[dim] > A.shape[dim]:
-            if dim == 1:
-                A_pad = np.zeros([A.shape[0], B.shape[1], A.shape[2]], dtype=data_dype)
-            elif dim == 0:
-                A_pad = np.zeros([B.shape[0], A.shape[1], A.shape[2]], dtype=data_dype)
-            A_pad[:A.shape[0], :A.shape[1], :A.shape[2]] = A
-        else:
-            A_pad = A
-    elif A.ndim == 2 and B.ndim == 3:
-        A = np.expand_dims(A, axis=-1)  # expand dim for added unit
-        if A.shape[dim] > B.shape[dim]:
-            # B_pad = np.zeros(A.shape)  # * np.mean(srcZ_T_re)
-            if dim == 1:
-                B_pad = np.zeros([B.shape[0], A.shape[1], B.shape[2]], dtype=data_dype)
-            elif dim == 0:
-                B_pad = np.zeros([A.shape[0], B.shape[1], B.shape[2]], dtype=data_dype)
-            B_pad[:B.shape[0], :B.shape[1], :B.shape[2]] = B
-        else:
-            B_pad = B
-        if B.shape[dim] > A.shape[dim]:
-            if dim == 1:
-                A_pad = np.zeros([A.shape[0], B.shape[1], A.shape[2]], dtype=data_dype)
-            elif dim == 0:
-                A_pad = np.zeros([B.shape[0], A.shape[1], A.shape[2]], dtype=data_dype)
-            A_pad[:A.shape[0], :A.shape[1], :A.shape[2]] = A
-        else:
-            A_pad = A
-    elif A.ndim == 3 and B.ndim == 2:
-        B = np.expand_dims(B, axis=-1)  # expand dim for added unit
-        if A.shape[dim] > B.shape[dim]:
-            # B_pad = np.zeros(A.shape)  # * np.mean(srcZ_T_re)
-            if dim == 1:
-                B_pad = np.zeros([B.shape[0], A.shape[1], B.shape[2]], dtype=data_dype)
-            elif dim == 0:
-                B_pad = np.zeros([A.shape[0], B.shape[1], B.shape[2]], dtype=data_dype)
-            B_pad[:B.shape[0], :B.shape[1], :B.shape[2]] = B
-        else:
-            B_pad = B
-        if B.shape[dim] > A.shape[dim]:
-            if dim == 1:
-                A_pad = np.zeros([A.shape[0], B.shape[1], A.shape[2]], dtype=data_dype)
-            elif dim == 0:
-                A_pad = np.zeros([B.shape[0], A.shape[1], A.shape[2]], dtype=data_dype)
-            A_pad[:A.shape[0], :A.shape[1], :A.shape[2]] = A
-        else:
-            A_pad = A
-    else:
-        warnings.warn("WARNING: Shape of A is {} and shape of B is {}".format(A.shape, B.shape))
-        A_pad = A
-        B_pad = B
-    del A, B
-    return A_pad, B_pad
-
-
-def registration_within(A, B, FFT_max_gaussian, error_overlap, X, Y, Z, i, localsubjectpath, extra_figs, high_thres):
-    """
-    This registers within a given X Y Z value. THis registered the optical zoom in the confocal imaging
-        Args:
-        -	A,B: the A and B array to register
-        -   FFT_max_gaussian: The fft sigma max to input Seg_reg_phase
-        -   error_overlap: The acceptable error limts
-        -   X, Y, Z, i: The values of this slice to use for naming and warnings
-        - localsubjectpath: path to save extra files
-        - extra_figs: set to true to save figures
-        - high_thres: this is for denoising if needed used in Seg_reg_phase
-
-        Returns:
-        -	error : registration error
-        -   shift_reg : registration shift
-        -   Within_Trans : registration transformation
-
-    """
-
-    shift_reg, error, diffphase = skimage.registration.phase_cross_correlation(A, B)
-    Within_Trans = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=0,
-                                                         translation=(shift_reg[1], shift_reg[0]))
-    trans_init_array = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
-    # here if NOT identity matrix output a warning
-    trans_init_array_np = np.array(trans_init_array)
-    if not np.array_equal(Within_Trans._inv_matrix, trans_init_array_np):
-        print(
-            "Non identify matrix found shift of {} and {} found for cube X {} Y {} Z {} and file {}, preprocessing file and running registration again".format(
-                shift_reg[0], shift_reg[1], X, Y, Z, i, ))
-        # try segmentation then regisstraataion with phasse correlation
-        name = '{}/Z_{}_X_{}_Y{}_i{}'.format(localsubjectpath, Z, X, Y, i)
-        [shift_reg, error, Within_Trans] = Seg_reg_phase(A, B, FFT_max_gaussian, name, extra_figs, high_thres)
-        reg_range_shift = range(round((-1 * (A.shape[0] / 10 * error_overlap))),
-                                round((A.shape[0] / 10 * error_overlap)))
-        if shift_reg[0] not in reg_range_shift or shift_reg[1] not in reg_range_shift:
-            warnings.warn(
-                "WARNING:for cube X {} Y {} Z{} and file {} we get non identity large transform of {}.Setting to idenity".format(
-                    X, Y, Z, i, Within_Trans._inv_matrix))
-            Within_Trans._inv_matrix = trans_init_array
-    del trans_init_array_np, trans_init_array
-    return error, shift_reg, Within_Trans
-
-
-def registration_X(srcY, desY, X_dir, FFT_max_gaussian, error_overlap, X, Y, Z, blank_thres, localsubjectpath,
-                   extra_figs, high_thres, input_overlap,
-                   target_overlapX=None):
-    """
-    This registers stiches along X axis
-        Args:
-        -	srcY, desY: the source and destination  array to register
-        -   X_dir: the direction of overlap (left or right)
-        -   FFT_max_gaussian: The fft sigma max to input Seg_reg_phase
-        -   error_overlap: The acceptable error limts
-        -   X, Y, Z: The values of this slice to use for naming and warnings
-        -  blank_thres: the threhold for ID blank images
-        - localsubjectpath:location to save output figures
-        - extra_figs: Set to true to make additional figures
-        - high_thres: used in feature based ID for denoise
-
-        Optional args:
-        - target_overlapX: calculated overlap
-        - input_overlap: inital guess of overlap
-
-        Returns:
-        -	error: registration error
-        -   shift : registration shift
-        -   target_overlapX  : initial registration guess along X
-
-    """
-
-    if input_overlap is None:
-        if X == 1 and Y == 0 and Z == 0:  # calculate the initial stitch level ONLY for first overlap
-            diroverlap = X_dir  # 'right'
-            [target_overlapX] = feature_CV2(desY, srcY, diroverlap, FFT_max_gaussian, high_thres, localsubjectpath,
-                                            input_overlap)
-    else:
-        # convert percent in image overlap to number of pixels
-        input_overlap = round(srcY.shape[1] * input_overlap)
-        if X == 1 and Y == 0 and Z == 0:  # calculate the initial stitch level ONLY for first overlap
-            diroverlap = X_dir  # 'right'
-            [target_overlapX] = feature_CV2(desY, srcY, diroverlap, FFT_max_gaussian, high_thres, localsubjectpath,
-                                            input_overlap)
-            # make sure user defined input of input_overlap, else just use calculated
-            try:
-                input_overlap
-            except NameError:
-                input_overlap = target_overlapX
-            # print warning if user defined overlap and calculated overlap different
-            if target_overlapX in range(round((input_overlap - (input_overlap * error_overlap))),
-                                        round((input_overlap + (input_overlap * error_overlap)))):
-                print("X overlap within {} % of user defined values.".format(error_overlap * 100))
-            else:
-                # print warning
-                warnings.warn(
-                    "WARNING: calculated X overlap of {} not within {} % of user defined overlap of {}. Using user defined overlap.".format(
-                        target_overlapX, (error_overlap * 100), input_overlap))
-                # use user defined value instead
-                target_overlapX = input_overlap
-    # calculate shift on MEAN image --> apply to whole image this helps with noisy images
-    srcY_mean = np.max(srcY, axis=2)  # , dtype=srcY.dtype)
-    desY_mean = np.max(desY, axis=2)  # , dtype=desY.dtype)
-    if X_dir == 'right':
-        shiftXi = -(srcY.shape[1] - abs(target_overlapX))
-    elif X_dir == 'left':
-        shiftXi = abs(target_overlapX)
-    SKI_Trans = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=0,
-                                                      translation=(shiftXi, 0))
-    srcY_Ti = skimage.transform.warp(srcY_mean, SKI_Trans._inv_matrix, mode='edge')
-    if srcY_Ti.max() < 1:  # only if max less then one convert to unit
-        srcY_Ti = skimage.img_as_uint(srcY_Ti, force_copy=False)
-    # srcY_Ti = np.array(srcY_Ti, dtype=srcY_mean.dtype)
-    # get phase correlation for small local change
-    print(target_overlapX)
-    if X_dir == 'right':
-        desY_mean_overlap = desY_mean[:, :(target_overlapX)]
-        srcY_Ti_mean_overlap = srcY_Ti[:, :(target_overlapX)]
-    elif X_dir == 'left':
-        desY_mean_overlap = desY_mean[:, -target_overlapX:]
-        srcY_Ti_mean_overlap = srcY_Ti[:, -target_overlapX:]
-
-    del desY_mean, srcY_mean
-    shift, error, diffphase = skimage.registration.phase_cross_correlation(desY_mean_overlap,
-                                                                           srcY_Ti_mean_overlap)
-    print('X original error of {}'.format(error))
-    print('X diff phase of {}'.format(diffphase))
-    # find if BLANK squares added together, if so redefine shift to zero
-    if desY_mean_overlap.max() < blank_thres * desY_mean_overlap.mean() and srcY_Ti_mean_overlap.max() < blank_thres * srcY_Ti_mean_overlap.mean():
-        print("Blank image overlap found at Y {} Z {} for X {} and X {}, setting to default overlap".format(Y, Z, X,
-                                                                                                            (X - 1)))
-        blank_overlap = True
-        shift = np.array([0, 0])
-        if extra_figs:
-            plt.figure()
-            plt.imshow(srcY_Ti_mean_overlap)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-            plt.savefig(
-                localsubjectpath + 'X=' + str(X) + 'Y=' + str(Y) + 'Z=' + str(Z) + '_source_overlap_X_blank.png',
-                format='png')
-            plt.close()
-            plt.figure()
-            plt.imshow(desY_mean_overlap)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-            plt.savefig(
-                localsubjectpath + 'X=' + str(X) + 'Y=' + str(Y) + 'Z=' + str(Z) + '_destination_overlap_X_blank.png',
-                format='png')
-            plt.close()
-    else:
-        blank_overlap = False
-    # give warning if shift is more then error_overlap of target_overlapX
-    # print warning if user defined overlap and calculated overlap different
-    X_range_shift = range(round((-1 * (target_overlapX * error_overlap))), round((target_overlapX * error_overlap)))
-    if shift[0] not in X_range_shift or shift[1] not in X_range_shift:
-        print("Sparse image found with shift of {} and {}. Using filtered phase shift for overlap registration.".format(
-            shift[1], shift[0]))
-        if extra_figs:
-            plt.figure()
-            plt.imshow(srcY_Ti_mean_overlap)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-            plt.savefig(
-                localsubjectpath + 'X=' + str(X) + 'Y=' + str(Y) + 'Z=' + str(Z) + '_source_overlap_X_sparse.png',
-                format='png')
-            plt.close()
-            plt.figure()
-            plt.imshow(desY_mean_overlap)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-            plt.savefig(
-                localsubjectpath + 'X=' + str(X) + 'Y=' + str(Y) + 'Z=' + str(Z) + '_destination_overlap_X_sparse.png',
-                format='png')
-            plt.close()
-        # try segmentation followed by phase correlation
-        name = '{}/Z_{}_X_{}_Y{}'.format(localsubjectpath, Z, X, Y)
-        [shift, error, Within_Trans] = Seg_reg_phase(desY_mean_overlap, srcY_Ti_mean_overlap, FFT_max_gaussian, name,
-                                                     extra_figs, high_thres)
-        print('X segmented data error of {}'.format(error))
-        # NOW IF STILL NOT WITHIN 10%... use defalt
-        if shift[0] not in X_range_shift or shift[1] not in X_range_shift:
-            # print warning
-            warnings.warn(
-                "WARNING: image overlap of Z {} Y {} and X {} and X {} not within error. Overlap varry by {} and {} pixels. changing to defult overlaap".format(
-                    Z, Y, (X - 1), X, shift[1], shift[0]))
-            shift = np.array([0, 0])
-    del srcY_Ti, SKI_Trans, desY_mean_overlap, srcY_Ti_mean_overlap
-    return error, shift, target_overlapX, blank_overlap
-
-
-def registration_Y(srcZ, desZ, Y_dir, FFT_max_gaussian, error_overlap, X, Y, Z, blank_thres, localsubjectpath,
-                   extra_figs, high_thres, input_overlap, target_overlapY=None):
-    """
-    This registers stiches along X axis
-        Args:
-        -	srcZ, desZ: the source and destination  array to register
-        -   Y_dir: the direction of overlap (top or bottom)
-        -   FFT_max_gaussian: The fft sigma max to input Seg_reg_phase
-        -   error_overlap: The acceptable error limts
-        -   X, Y, Z: The values of this slice to use for naming and warnings
-        -  blank_thres: the threhold for ID blank images
-        - localsubjectpath:location to save output figures
-        - extra_figs: Set to true to make additional figures
-        - high_thres: used in feature based ID for denoise
-        Optional args:
-        - target_overlapY: calculated overlap
-        - input_overlap: input guess of overlap
-
-        Returns:
-        -	error: registration error
-        -   shift : registration shift
-        -   target_overlapY  : initial registration guess along Y
-
-    """
-    if input_overlap is None:
-        if Y == 1 and Z == 0:  # calculate the initial stitch level ONLY for first overlap
-            if Y_dir == 'top':
-                diroverlap = 'down'
-            elif Y_dir == 'bottom':
-                diroverlap = 'up'
-            [target_overlapY] = feature_CV2(desZ, srcZ, diroverlap, FFT_max_gaussian, high_thres, localsubjectpath,
-                                            input_overlap)
-    else:
-        # convert percent in image overlap to number of pixels
-        input_overlap = round(srcZ.shape[0] * input_overlap)
-        # pad in the Y
-        dim = 1
-        [srcZ, desZ] = zero_pad(srcZ, desZ, dim)
-        if Y == 1 and Z == 0:  # calculate the initial stitch level ONLY for first overlap
-            if Y_dir == 'top':
-                diroverlap = 'down'
-            elif Y_dir == 'bottom':
-                diroverlap = 'up'
-            [target_overlapY] = feature_CV2(desZ, srcZ, diroverlap, FFT_max_gaussian, high_thres, localsubjectpath,
-                                            input_overlap)
-            # print warning if user defined overlap and calculated overlap different
-            if target_overlapY in range(round((input_overlap - (input_overlap * error_overlap))),
-                                        round((input_overlap + (input_overlap * error_overlap)))):
-                print("Y overlap within {} of user defined values.".format(error_overlap))
-            else:
-                # print warning
-                warnings.warn(
-                    "WARNING: calculated Y overlap of {} not within {} % of user defined overlap of {}. Using user defined overlap.".format(
-                        target_overlapY, (error_overlap * 100), input_overlap))
-                target_overlapY = input_overlap
-    # calculate shift on MEAN image --> apply to whole image this helps with noisy images
-    srcZ_mean = np.max(srcZ, axis=2)  # , dtype=srcZ.dtype)
-    desZ_mean = np.max(desZ, axis=2)  # , dtype=desZ.dtype)
-    if Y_dir == 'top':
-        shiftYi = -(srcZ.shape[0] - abs(target_overlapY))
-    elif Y_dir == 'bottom':
-        shiftYi = abs(target_overlapY)
-    SKI_Trans = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=0,
-                                                      translation=(0, shiftYi))
-    srcZ_Ti = skimage.transform.warp(srcZ_mean, SKI_Trans._inv_matrix, mode='edge')
-    if np.max(srcZ_Ti) < 1:  # only if max less then one convert to unit
-        srcZ_Ti = skimage.img_as_uint(srcZ_Ti, force_copy=False)
-    else:
-        srcZ_Ti = np.array(srcZ_Ti, dtype=srcZ_mean.dtype)
-    # get phase correlation for small local change
-    if Y_dir == 'top':
-        desZ_mean_overlap = desZ_mean[:(target_overlapY), :]
-        srcZ_Ti_mean_overlap = srcZ_Ti[:(target_overlapY), :]
-    elif Y_dir == 'bottom':
-        desZ_mean_overlap = desZ_mean[-(target_overlapY):, :]
-        srcZ_Ti_mean_overlap = srcZ_Ti[-(target_overlapY):, :]
-    del desZ_mean, srcZ_mean
-    shift, error, diffphase = skimage.registration.phase_cross_correlation(desZ_mean_overlap, srcZ_Ti_mean_overlap)
-    print('Y original error of {}'.format(error))
-    print('Y original diff phase of {}'.format(diffphase))
-    # find if BLANK squares added together, if so redefine shift to zero
-    if desZ_mean_overlap.max() < blank_thres * desZ_mean_overlap.mean() and srcZ_Ti_mean_overlap.max() < blank_thres * srcZ_Ti_mean_overlap.mean():
-        print("Blank image overlap found at Z {} for y {} and Y {}, setting to default overlap".format(Z, Y,
-                                                                                                       (Y - 1)))
-        shift = np.array([0, 0])
-        if extra_figs:
-            plt.figure()
-            plt.imshow(srcZ_Ti_mean_overlap)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-            plt.savefig(localsubjectpath + 'Y=' + str(Y) + 'Z=' + str(Z) + '_source_overlap_Y_blank.png', format='png')
-            plt.close()
-            plt.figure()
-            plt.imshow(desZ_mean_overlap)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-            plt.savefig(localsubjectpath + 'Y=' + str(Y) + 'Z=' + str(Z) + '_destination_overlap_Y_blank.png',
-                        format='png')
-            plt.close()
-    Y_range_shift = range(round((-1 * (target_overlapY * error_overlap))),
-                          round((target_overlapY * error_overlap)))
-    if shift[0] not in Y_range_shift or shift[1] not in Y_range_shift:
-        print("Sparse image found with shift of {} and {}. Using filtered phase shift for overlap registration.".format(
-            shift[0], shift[1]))
-        if extra_figs:
-            plt.figure()
-            plt.imshow(srcZ_Ti_mean_overlap)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-            plt.savefig(localsubjectpath + 'Y=' + str(Y) + 'Z=' + str(Z) + '_source_overlap_Y_sparse.png', format='png')
-            plt.close()
-            plt.figure()
-            plt.imshow(desZ_mean_overlap)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-            plt.savefig(localsubjectpath + 'Y=' + str(Y) + 'Z=' + str(Z) + '_destination_overlap_Y_sparse.png',
-                        format='png')
-            plt.close()
-        # try segmentation and regisstration
-        name = '{}/Z_{}_X_{}_Y{}'.format(localsubjectpath, Z, X, Y)
-        [shift, error, Within_Trans] = Seg_reg_phase(desZ_mean_overlap, srcZ_Ti_mean_overlap, FFT_max_gaussian, name,
-                                                     extra_figs, high_thres)
-        print('Y segmented data error of {}'.format(error))
-        # NOW IF STILL NOT WITHIN 10%... use defalt
-        if shift[0] not in Y_range_shift or shift[1] not in Y_range_shift:
-            # print warning
-            warnings.warn(
-                "WARNING: image overlap of Z {} for Y {} and Y {} not within error. Overlap varry by {} and {} pixels. Changing to default overlap".format(
-                    Z, Y, (Y - 1), shift[0], shift[1]))
-            shift = np.array([0, 0])
-    del desZ_mean_overlap, srcZ_Ti_mean_overlap, SKI_Trans, srcZ_Ti
-    return error, shift, target_overlapY
-
-
-# In case of boolaen segmentation, the dice loss is equal to 2 x dot product of the flattened arrays,
-# divided by the total volume of both masks.
-def dice_loss(y_true, y_pred):
-    y_true = y_true.flatten()
-    y_pred = y_pred.flatten()
-    intersection = y_true.dot(y_pred)
-    union = sum(y_true) + sum(y_pred)
-    dice = 2 * intersection / union
-    return dice
-
-
-def rmsdiff(source, source_transformed, destination):
-    import ants
-    source_ant = ants.from_numpy(data=source)
-    destination_ant = ants.from_numpy(data=destination)
-    # register 2 datasets
-    mytx = ants.registration(fixed=destination_ant, moving=source_ant, initial_transform=None, outprefix="test",
-                             dimension=2)  # “Similarity”
-    # apply transfrom to unsegmented data
-    p2_reg_ants = ants.apply_transforms(fixed=bar_ant, moving=p2_ant, transformlist=mytx['fwdtransforms'])
-    # convert back to numpy
-    p2_reg = p2_reg_ants.numpy()
-
-    ants.image_mutual_information(source_ant, destination_ant)
-
-    # todo .... find a way to compapre Z matching methods....
-
-    from sklearn.metrics import mean_squared_error
-    from math import sqrt
-
-    rms = sqrt(mean_squared_error(im1, im2))
-
-    "Calculate the root-mean-square difference between two images"
-    from PIL import Image
-    from matplotlib import cm
-    im1_im = Image.fromarray(np.uint8(cm.gist_earth(im1) * 255))
-    im2_im = Image.fromarray(np.uint8(cm.gist_earth(im2) * 255))
-
-    diff = ImageChops.difference(im1, im2)
-
-    diff = np.abs(im1 - im2)
-
-    h = np.histogram(diff)  # diff.histogram()
-    sq = (value * (idx ** 2) for idx, value in enumerate(h))
-    sum_of_squares = sum(sq)
-    rms = math.sqrt(sum_of_squares / float(im1.size[0] * im1.size[1]))
-
-    # or does this evaluate?
-    # or what if we try: sum of squared intensity differences (SSD): -->
-
-    return rms
-
-
-def zca_whitening_matrix(X):
-    """
-    Function to compute ZCA whitening matrix (aka Mahalanobis whitening).
-    INPUT:  X: [M x N] matrix.
-        Rows: Variables
-        Columns: Observations
-    OUTPUT: ZCAMatrix: [M x M] matrix
-    """
-    # Covariance matrix [column-wise variables]: Sigma = (X-mu)' * (X-mu) / N
-    sigma = np.cov(X, rowvar=True)  # [M x M]
-    # Singular Value Decomposition. X = U * np.diag(S) * V
-    U, S, V = np.linalg.svd(sigma)
-    # U: [M x M] eigenvectors of sigma.
-    # S: [M x 1] eigenvalues of sigma.
-    # V: [M x M] transpose of U
-    # Whitening constant: prevents division by zero
-    epsilon = 1e-5
-    # ZCA Whitening matrix: U * Lambda * U'
-    ZCAMatrix = np.dot(U, np.dot(np.diag(1.0 / np.sqrt(S + epsilon)), U.T))  # [M x M]
-    return ZCAMatrix
-
-def auto_detect_180(destination_feature, source_feature, localsubjectpath):
-    """
-    This finds if 180 is found or not. This uses elastix.
-    Documentation of elastix at: https://elastix.lumc.nl/doxygen/index.html and http://elastix.bigr.nl/wiki/index.php/Par0013
-    input:
-    destination_feature: destination image
-    source_feature: source image
-    localsubjectpath: path to save files
-
-    output:
-    new_angle_rad: angle either 180 or 0 if 180 rotation detected
-    """
-    # rotate image by theta_rad, set to 180 or 0 in Z registration code
-    # source_feature = skimage.transform.rotate(source_feature, math.degrees(theta_rad)) #here we want to use segmented image b/c intensity of blood vessesl isnt meaninful
-    # convert data to work with elastix software package
-    destination_feature = destination_feature.astype(np.float32)
-    source_feature = source_feature.astype(np.float32)
-    fixed_image_feature = itk.image_from_array(destination_feature)
-    moving_image_feature = itk.image_from_array(source_feature)
-    # define parameter file
-    parameter_object = itk.ParameterObject.New()
-    default_rigid_parameter_map = parameter_object.GetDefaultParameterMap('rigid')
-    parameter_object.AddParameterMap(default_rigid_parameter_map)
-    parameter_object.SetParameter("Transform", "EulerTransform")  # this is rigid
-    parameter_object.SetParameter("Optimizer",
-                                  "StandardGradientDescent")  # full search # this allows me to pick step size what about evolutionary strategy? FullSearch, ConjugateGradient, ConjugateGradientFRPR, QuasiNewtonLBFGS, RSGDEachParameterApart, SimultaneousPerturbation, CMAEvolutionStrategy.
-    parameter_object.SetParameter("Registration", "MultiResolutionRegistration")
-    parameter_object.SetParameter("Metric",
-                                  "AdvancedKappaStatistic")  # "AdvancedNormalizedCorrelation") #AdvancedNormalizedCorrelation") #maybe AdvancedMattesMutualInformation
-    parameter_object.SetParameter("FixedInternalImagePixelType", "float")
-    parameter_object.SetParameter("MovingInternalImagePixelType", "float")
-    parameter_object.SetParameter("FixedImageDimension", "2")
-    parameter_object.SetParameter("MovingImageDimension", "2")
-    parameter_object.SetParameter("FixedImagePyramid", "FixedRecursiveImagePyramid")  # smooth and downsample
-    parameter_object.SetParameter("MovingImagePyramid", "MovingRecursiveImagePyramid")  # smooth and downsample
-    parameter_object.SetParameter("NumberOfResolutions", "6")  # high resoltuiions b/c large shifts
-    parameter_object.SetParameter("DefaultPixelValue", "0")  # this is b/c background is 0
-    parameter_object.SetParameter("ImageSampler",
-                                  "Grid")  # want full b/c random sampler would give different metric to compare results so full or grid should work, full is really slow
-    parameter_object.SetParameter("NewSamplesEveryIteration",
-                                  "false")  # want false b/c random sampler would give different metric to compare results
-    parameter_object.SetParameter("Scales", "1.0")  # this is so rotation and translation treated equally
-    parameter_object.SetParameter("UseDirectionCosines", "false")
-    parameter_object.SetParameter("AutomaticTransformInitialization", "true")
-    parameter_object.SetParameter("AutomaticTransformInitializationMethod", "GeometricalCenter")
-    parameter_object.SetParameter("UseComplement", "false")
-    parameter_object.SetParameter("WriteResultImage", "true")
-    parameter_object.SetParameter("MaximumNumberOfIterations", "500")
-    parameter_object.SetParameter("MaximumNumberOfSamplingAttempts", "3")
-
-    # note: This is something specific to our scope and probably would not generalize to data from other people. I would just rotate them manually for each dataset.
-    # rotate image 180 degrees
-    # source_denoise_180 = skimage.transform.rotate(source_denoise, 180)
-    # source_denoise_180 = source_denoise_180.astype(np.float32)
-    # moving_image_denoise_180 = itk.image_from_array(source_denoise_180)
-    source_feature_180 = skimage.transform.rotate(source_feature, 180)
-    source_feature_180 = source_feature_180.astype(np.float32)
-    moving_image_feature_180 = itk.image_from_array(source_feature_180)
-    # get registration metirc for 180 and original data
-    result_image, result_transform_parameters = itk.elastix_registration_method(fixed_image=fixed_image_feature,
-                                                                                moving_image=moving_image_feature,
-                                                                                parameter_object=parameter_object,
-                                                                                log_to_console=True, log_to_file=True,
-                                                                                output_directory=localsubjectpath)  # '/Users/kaleb/Documents/CSHL/2d_3D_linear_reg/')
-    # load localsubjectpath /elastix.log file
-    file1 = open(localsubjectpath + "elastix.log", "r")
-    string = file1.read()
-    m1 = re.search('Final metric value  = (\d+.\d+)', string)
-    Final_metric_value = float(m1.group(1))
-    file1.close()
-    # get denoise (with feaure-- multimodal?) 180 rotation registration
-    result_image_180, result_transform_parameters_180 = itk.elastix_registration_method(fixed_image=fixed_image_feature,
-                                                                                        moving_image=moving_image_feature_180,
-                                                                                        parameter_object=parameter_object,
-                                                                                        log_to_console=True,
-                                                                                        log_to_file=True,
-                                                                                        output_directory=localsubjectpath)  # '/Users/kaleb/Documents/CSHL/2d_3D_linear_reg/')
-    file2 = open(localsubjectpath + "elastix.log", "r")
-    string = file2.read()
-    m2 = re.search('Final metric value  = (\d+.\d+)', string)
-    Final_metric_value_180 = float(m2.group(1))
-    file2.close()
-    # if 180 rotaoin better:
-    if Final_metric_value_180 > Final_metric_value:  # for AdvancedKappaStatistic higher value is better (1.0 = prefect)
-        result_image_good = result_image_180
-        result_transform_parameters_good = result_transform_parameters_180
-        warnings.warn(message="WARNING: 180 degree rotation detected")
-        add_theta = 180
-    else:
-        result_image_good = result_image
-        result_transform_parameters_good = result_transform_parameters
-        add_theta = 0
-    # now get rotation and translations measurements
-    # pm0 = result_transform_parameters_good.GetParameterMap(0)
-    # center = [float(p) for p in pm0['CenterOfRotationPoint']]  # todo take this as center of rotatiion
-    # elx_parameters = [float(p) for p in pm0['TransformParameters']]  # todo take this as translation and degree values?
-    # Y_shift =   #these aare in number of pixels (sould be -150 for test case)
-    # X_shift =   #these aare in number of pixels (shoould be -100 for test case)
-    # elx_angle=  #this  is in radians (should be 5 for test case)
-    # new_angle_rad = elx_angle + math.radians(add_theta) #this  is in radians both 180 or not roation and elastix rotation
-    # shift[0] = Y_shift  #Y direction, axis 0
-    # shift[1] = X_shift  #X direction, axis 1
-    new_angle_rad = math.radians(add_theta)
-
-    return new_angle_rad
-
-
-def phase_corr_rotation(destination, source, degree_thres, theta_rad):
-    """
-    This finds the rotation angle if small
-
-    Input:
-    destination: destination image
-    source: source image
-    degree_thres: degree threshold for warning messages
-    theta_rad: amount to initially rotate if given
-
-    Output:
-    new_angle_rad: output angle to rotation in radians
-    """
-    # rotate source by theta
-    source_theta = skimage.transform.rotate(source, math.degrees(theta_rad))
-
-    myconstraints = {
-        "scale": [1, 0]  # this is a scale of 1 without and stardev
-        # todo add  degree_thres as a constriant here???
-    }
-    result = ird.imreg.similarity(destination, source_theta,
-                                  constraints=myconstraints)
-    theta = abs(result["angle"])
-
-    lst = [0, 180]  # this is list of angles to return closest one to measured valve
-    idx = (np.abs(lst - theta)).argmin()
-    new_angle_180_0 = lst[idx]
-    if new_angle_180_0 == 180:
-        warnings.warn(message="WARNING: 180 degree rotation detected")
-    # if outside threshold
-    if np.abs((new_angle_180_0 - theta)) > degree_thres:
-        # if outside threshold set theta to 0, b/c setting to 180 or 0 might lead to false postive if not strong evidance of 180 rotation
-        new_angle = 0
-        warnings.warn(
-            message="WARNING: Z rotation degree shift larger then {} from {}, angle of {} detected. Setting angle to {}".format(
-                degree_thres, new_angle_180_0, np.abs((new_angle_180_0 - theta)), new_angle))
-    else:
-        new_angle = theta
-    print('Z Theta is {}'.format(new_angle))
-    # convert angle to radians
-    new_angle_rad = math.radians(new_angle)
-    return new_angle_rad
-
-
-def elastix_2D_registration(destination, source, nonlinear_trans):
-    """
-    This fund non-linear (bspline) or linear (similarity) transform between source and destination data. THis uses elastix registtration
-
-    Input:
-    destination: destination image, ideally feature based image
-    source: source image, ideally feature based image
-    nonlinear_trans: This is set to true to find on-linear transformation, false for linear transformation
-
-    Output:
-    transformation: elastix tranfomation matrix
-    """
-
-    # todo try elastic on failed 2d to 2d registratoin also try optical flow, feature based???? try phase correaltion on raw data? try prewhitten b4 denosie phase correaltion?
-    # _deps/elx-src/Common/OpenCL/ITKimprovements/itkOpenCLContext.cxx(387): itkOpenCL warning.
-    # Warning: in function: Create; Name: OpenCLContext (0x555557873e00)
-    # Details: OpenCLContext::Create(method:4):CL_INVALID_PLATFORM
-    # this gets tranformation parameters: GetTransformParameterMap()
-    # (TransformParameters θ_x , θ_y , θ_z , t_x , t_y , t_z) --> in mm???
-
-    # convert data to work with elastix software package
-    destination_feature = destination.astype(np.float32)
-    source_feature = source.astype(np.float32)
-    fixed_image_feature = itk.image_from_array(destination_feature)
-    moving_image_feature = itk.image_from_array(source_feature)
-    # define parameter file
-    parameter_object = itk.ParameterObject.New()
-    if nonlinear_trans:
-        default_bspline_parameter_map = parameter_object.GetDefaultParameterMap('bspline')
-        parameter_object.AddParameterMap(default_bspline_parameter_map)
-        parameter_object.SetParameter("Transform",
-                                      "BSplineTransform")  # this is non-linear(use (SplineKernelTransform) for feautres
-    else:
-        default_rigid_parameter_map = parameter_object.GetDefaultParameterMap('rigid')
-        parameter_object.AddParameterMap(default_rigid_parameter_map)
-        parameter_object.SetParameter("Transform", "SimilarityTransform")  # this is scale, rottation, and translation
-    parameter_object.SetParameter("Optimizer",
-                                  "StandardGradientDescent")  # full search # this allows me to pick step size what about evolutionary strategy? FullSearch, ConjugateGradient, ConjugateGradientFRPR, QuasiNewtonLBFGS, RSGDEachParameterApart, SimultaneousPerturbation, CMAEvolutionStrategy.
-    parameter_object.SetParameter("Registration", "MultiResolutionRegistration")
-    parameter_object.SetParameter("Metric",
-                                  "AdvancedKappaStatistic")  # "AdvancedNormalizedCorrelation") #AdvancedNormalizedCorrelation") #maybe AdvancedMattesMutualInformation
-    parameter_object.SetParameter("FixedInternalImagePixelType", "float")
-    parameter_object.SetParameter("MovingInternalImagePixelType", "float")
-    parameter_object.SetParameter("FixedImageDimension", "2")
-    parameter_object.SetParameter("MovingImageDimension", "2")
-    parameter_object.SetParameter("FixedImagePyramid", "FixedRecursiveImagePyramid")  # smooth and downsample
-    parameter_object.SetParameter("MovingImagePyramid", "MovingRecursiveImagePyramid")  # smooth and downsample
-    parameter_object.SetParameter("NumberOfResolutions", "6")  # high resoltuiions b/c large shifts
-    parameter_object.SetParameter("DefaultPixelValue", "0")  # this is b/c background is 0
-    parameter_object.SetParameter("ImageSampler",
-                                  "Grid")  # want full b/c random sampler would give different metric to compare results so full or grid should work, full is really slow
-    parameter_object.SetParameter("NewSamplesEveryIteration",
-                                  "false")  # want false b/c random sampler would give different metric to compare results
-    # parameter_object.SetParameter("Scales", "1.0")  # this is so rotation and translation treated equally
-    parameter_object.SetParameter("UseDirectionCosines", "false")
-    parameter_object.SetParameter("AutomaticTransformInitialization", "true")
-    parameter_object.SetParameter("AutomaticTransformInitializationMethod", "GeometricalCenter")
-    parameter_object.SetParameter("UseComplement", "false")
-    parameter_object.SetParameter("WriteResultImage", "true")
-    parameter_object.SetParameter("MaximumNumberOfIterations", "500")
-    parameter_object.SetParameter("MaximumNumberOfSamplingAttempts", "3")
-
-    # get registration metirc for 180 and original data
-    result_image, result_transform_parameters = itk.elastix_registration_method(fixed_image=fixed_image_feature,
-                                                                                moving_image=moving_image_feature,
-                                                                                parameter_object=parameter_object,
-                                                                                log_to_console=True, log_to_file=True,
-                                                                                output_directory=localsubjectpath)
-
-    return result_transform_parameters
-
-
-
-def part_in_whole_registration(whole_image, template):
-    """
-    This finds where a given template is located within a given whole image. Works for 2D or 3D images
-
-    Input:
-    whole_image: The whole image
-    template: The template image
-
-    Output:
-    whole_image_template: The whole image that corresponds to the template
-    XYZ_temp = the corrdinates of where the template is located within the whole image
-
-    see: https://docs.opencv.org/3.4/de/da9/tutorial_template_matching.html
-    """
-
-    # https: // scikit - image.org / docs / dev / auto_examples / features_detection / plot_template.html  # sphx-glr-auto-examples-features-detection-plot-template-py
-
-    # get max value center point
-    # ij = np.unravel_index(np.argmax(result), result.shape)
-    # x, y = ij[::-1] #this is center X Y value
-    # htemp, wtemp = template.shape
-    # rect = plt.Rectangle((x, y), wtemp, htemp, edgecolor='r', facecolor='none')
-
-    # Run registration with no rotations
-    px_z = field_z - stack_z + stack.shape[0] / 2 - 0.5
-    mini_stack = stack[max(0, int(round(px_z - rigid_zrange))): int(round(
-        px_z + rigid_zrange))]
-    corrs = np.stack([skimage.feature.match_template(whole_image, template, pad_input=True) for s in
-                      mini_stack])
-    smooth_corrs = scipy.ndimage.gaussian_filter(corrs, 0.7)
-
-    # Get results
-    min_z = max(0, int(round(px_z - rigid_zrange)))
-    min_y = int(round(0.05 * stack.shape[1]))
-    min_x = int(round(0.05 * stack.shape[2]))
-    mini_corrs = smooth_corrs[:, min_y:-min_y, min_x:-min_x]
-    rig_z, rig_y, rig_x = np.unravel_index(np.argmax(mini_corrs), mini_corrs.shape)
-
-    # Rewrite coordinates with respect to original z
-    rig_z = (min_z + rig_z + 0.5) - stack.shape[0] / 2
-    rig_y = (min_y + rig_y + 0.5) - stack.shape[1] / 2
-    rig_x = (min_x + rig_x + 0.5) - stack.shape[2] / 2
-
-    # XYZ_temp =
-
-    # whole_imaage_template =
-
-    return whole_imaage_template, XYZ_temp
-
-
-# todo prewhitten data before phase correatlion?
-
-
-def crop_Z(image, list_manual_Z_crop, Z, extra_figs, localsubjectpath):
-    """
-    This crops a given image with defined y_start, y_end, x_start, x_end values. These are read in from list_manual_Z_crop.Can only crop along X and Y
-        Args:
-        -	image: the image to apply cropping to this can be 2D or 3D
-        -   list_manual_Z_crop: the path to the excel file with cropping parameters for a given Z
-        -   Z: Z value to search for given cropping parameters
-        -   extra_figs: this is true to make figures, false to not make figures
-        - localsubjectpath: this is the path location to save figures
-
-        Returns:
-        -	image_crop: this is the cropped image. After cropping image is zero padded. this will match 2d or 3D dimensions in image
-    """
-    # if list_manual_Z_crop is given then crop image before registration below
-    if np.any(list_manual_Z_crop) is not None:
-        # load data
-        npcsv = np.genfromtxt(list_manual_Z_crop, delimiter=',', encoding='utf8', dtype=np.str)
-        # get Z values --> find Z in first row somewhere  --> add .lower to can look at captial or not
-        namaes = np.char.lower(npcsv[0])  # names is first row
-        values = np.zeros([npcsv.shape[0] - 1, npcsv.shape[1]])
-        for i in range(1, npcsv.shape[0]):
-            vi = i - 1
-            values[vi][:] = list(map(int, npcsv[i]))
-        # find row with Z, 'Y_start', 'Y_end', 'X_start', 'X_end'
-        zstr = 'z'
-        Zrow = np.flatnonzero(np.core.defchararray.find(namaes, zstr) != -1)
-        if Zrow.size <= 0:
-            warnings.warn(message="WARNING:No Z colum found in list_manual_Z_crop csv file")
-        YSstr = 'y_start'
-        y_start_row = np.flatnonzero(np.core.defchararray.find(namaes, YSstr) != -1)
-        if y_start_row.size <= 0:
-            warnings.warn(message="WARNING:No y_start colum found in list_manual_Z_crop csv file")
-        YEstr = 'y_end'
-        y_end_row = np.flatnonzero(np.core.defchararray.find(namaes, YEstr) != -1)
-        if y_end_row.size <= 0:
-            warnings.warn(message="WARNING:No y_end colum found in list_manual_Z_crop csv file")
-        XSstr = 'x_start'
-        x_start_row = np.flatnonzero(np.core.defchararray.find(namaes, XSstr) != -1)
-        if x_start_row.size <= 0:
-            warnings.warn(message="WARNING:No x_start colum found in list_manual_Z_crop csv file")
-        XEstr = 'x_end'
-        x_end_row = np.flatnonzero(np.core.defchararray.find(namaes, XEstr) != -1)
-        if x_end_row.size <= 0:
-            warnings.warn(message="WARNING:No x_end colum found in list_manual_Z_crop csv file")
-        Z_values = values[:, Zrow[0]]
-        XS_values = values[:, x_start_row[0]]
-        XE_values = values[:, x_end_row[0]]
-        YS_values = values[:, y_start_row[0]]
-        YE_values = values[:, y_end_row[0]]
-        # check if Z  are in list
-        if np.any(Z == Z_values):
-            src_Z_index = np.where(Z_values == Z)
-            Y_startS = YS_values[src_Z_index]
-            Y_endS = YE_values[src_Z_index]
-            X_startS = XS_values[src_Z_index]
-            X_endS = XE_values[src_Z_index]
-        else:  # no crop in  image
-            Y_startS = 0
-            Y_endS = image.shape[0] - 1
-            X_startS = 0
-            X_endS = image.shape[1] - 1
-        if image.ndim == 3:
-            for i in range(image.shape[2]):
-                image_crop_one = image[Y_startS:Y_endS, X_startS:X_endS, i]
-                image_crop_one = np.expand_dims(image_crop_one, axis=-1)
-                if i != 0:
-                    image_crop = np.concatenate((image_crop, image_crop_one), axis=2)
-                else:
-                    image_crop = image_crop_one
-        if image.ndim == 2:
-            image_crop = image[Y_startS:Y_endS, X_startS:X_endS]
-        # pad cropped image with zeros until size of image
-        dim = 1
-        [image, image_crop] = zero_pad(image, image_crop, dim)
-        dim = 0
-        [image, image_crop] = zero_pad(image, image_crop, dim)
-        if extra_figs:
-            plt.figure()
-            plt.imshow(image_crop)  # , norm=matplotlib.colors.LogNorm(vmin=-1, vmax=1))
-            plt.savefig(localsubjectpath + 'Z=' + str(Z) + '_cropped_image.png', format='png')
-            plt.close()
-    else:
-        image_crop = image
-    return image_crop
-
-
-# todo add if phase correlatioin fails (based on??) then do feature based registration instead of phase correlation --> in case not mounted properly
-
-def registration_Z(src3d, src3d_denoise, des3d_denoise, src3d_feature, des3d_feature, count_shiftZ, shiftZ, angleZ,
-                   apply_transform, rigid_2d3d, error_overlap, find_rot, degree_thres, denoise_all, max_Z_proj_affine,
-                   seq_dir, maxZshift_percent, Z, list_180_Z_rotation, auto_180_Z_rotation, localsubjectpath,
-                   Z_reg_denoise_or_feature):
-    """
-    This registers 2D to 3D along Z axis
-        Args:
-        -   src3d: raw source data to transform
-        -	src3d_feature, des3d_feature: the source and destination feature map, used to register rigid
-        -   src3d_denoise, des3d_denoise: the source and destination deionised data, used to affine
-        -   count_shiftZ: the number of countZ to load from saved array if needed
-        -   shiftZ, angleZ: saved shifitZ data translation and angle
-        -   apply_transform: True if run saved transformations, false otherwise
-        -   rigid_2d3d: True if run rigid registration, false otherwise
-        -   error_overlap,
-        -   find_rot: set to true if find rotation, other wise false
-        -   degree_thres,
-        -   denoise_all: set to ture to apply to all images, false if max projection used
-        -   max_Z_proj_affine: set to true for max projection
-        -   seq_dir = this is 'top' if POS1 is above POS 0 and 'bottom' if POS 1 is below POS 0
-        -   maxZshift_percent: "This is used place limits on the Z plane to Z plane translation. This is the percent of the image allowed for translation, if above this threhold set to 0 translation. The default is 25% of the image. (ex:--maxZshift_percent=25)(default:25)")
-        -   Z: current Z value for file names
-        -   list_180_Z_rotation: if user defined list of images to rotate 180 degrees
-        -   auto_180_Z_rotation: Set to true to automatically find the 180 degree rotation
-        -   localsubjectpath: file path to save files
-        -   Z_reg_denoise_or_feature: this is set to 'feaure' or 'denoise'. This registeres eaither denosie or freautre input based on this input
-
-        Returns:
-        -	src3d_T_feature: source feature file shifted with registration values
-        -   des3d_feature : destination feature file
-        -   count_shiftZ, shiftZ:  registration shift
-        -   src3d_T: source raw file shifted with registration values
-
-    """
-
-    # todo remove these extra names
-    src3d_denoise_crop = src3d_denoise
-    des3d_denoise_crop = des3d_denoise
-    src3d_feature_crop = src3d_feature
-    des3d_feature_crop = des3d_feature
-    # todo remove these extra names
-
-    # todo nice ppt on optial flow" https://github.com/aplyer/gefolki/blob/master/COREGISTRATION.pdf
-    Z_max_shift0 = src3d.shape[0] * (maxZshift_percent / 100)
-    Z_max_shift1 = src3d.shape[1] * (maxZshift_percent / 100)
-    if denoise_all:
-        if max_Z_proj_affine:
-            src3d_denoise_one = np.max(src3d_denoise_crop, axis=2)  # todo change back to max?
-            des3d_denoise_one = np.max(des3d_denoise_crop, axis=2)
-        else:
-            if seq_dir == 'top':
-                src3d_denoise_one = src3d_denoise_crop[:, :, 0]
-                des3d_denoise_one = des3d_denoise_crop[:, :, -1]
-            elif seq_dir == 'bottom':
-                src3d_denoise_one = src3d_denoise_crop[:, :, -1]
-                des3d_denoise_one = des3d_denoise_crop[:, :, 0]
-            else:
-                warnings.warn(message="WARNING:opticalZ_dir variable not defined correctly")
-    else:
-        src3d_denoise_one = src3d_denoise_crop
-        des3d_denoise_one = des3d_denoise_crop
-    error_allZ = []
-    if Z_reg_denoise_or_feature == 'denoise':
-        src3d_reg = src3d_denoise_one
-        des3d_reg = des3d_denoise_one
-    elif Z_reg_denoise_or_feature == 'feature':
-        src3d_reg = src3d_feature_crop
-        des3d_reg = des3d_feature_crop
-    if list_180_Z_rotation is not None:
-        if Z in list_180_Z_rotation:
-            # deffine theta as 180 degrees for transformation
-            theta = 180
-            # set auto_180_Z_rotation for this Z to false if true
-            auto_180_Z_rotation = False
-        else:
-            theta = 0
-    else:
-        theta = 0
-    theta_rad = math.radians(theta)
-    if auto_180_Z_rotation:
-        new_angle_rad = auto_detect_180(des3d_reg, src3d_reg, localsubjectpath)
-        theta_rad = new_angle_rad
-    if rigid_2d3d:
-        if apply_transform:
-            error = 0  # not calculated
-            shift = shiftZ[count_shiftZ]
-            angle_rad = angleZ[count_shiftZ]
-            count_shiftZ = count_shiftZ + 1
-        else:
-            # find rotation
-            if find_rot:
-                angle_rad = phase_corr_rotation(des3d_reg, src3d_reg, degree_thres,
-                                                theta_rad)
-            else:
-                angle_rad = 0.0
-            # basic phase corr only
-            shift, error, diffphase = skimage.registration.phase_cross_correlation(des3d_reg,
-                                                                                   src3d_reg)
-            if np.abs(shift[0]) > Z_max_shift1 or np.abs(shift[1]) > Z_max_shift0:
-                warnings.warn(
-                    message="WARNING: Z shift exceeded limits, shift X = {} shift y = {}. Seeting Z translation to zero.".format(
-                        shift[1], shift[0]))
-                shift[0] = 0
-                shift[1] = 0
-            print('Z Phase translation is {}'.format(shift))
-            shiftZ.append(shift)
-            angleZ.append(angle_rad)
-        error_allZ.append(error)
-        # calculate OVERALL SHIFT from inital guess + phase correlations
-        SKI_Trans_all_Z = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=(angle_rad + theta_rad),
-                                                                translation=(shift[1], shift[0]))
-        # apply to image in src3d feature map
-        src3d_T_feature = skimage.transform.warp(src3d_feature, SKI_Trans_all_Z._inv_matrix, order=0, mode='edge',
-                                                 preserve_range=True)
-        # this chnage back to unit 8 dtype from float 64, this and preserve range are needed to keep shift as binary image
-        src3d_T_feature = src3d_T_feature.astype(src3d_feature.dtype)
-        # loop comprehension to apply to all images in src3d
-        src3d_T = [
-            skimage.transform.warp(src3d[:, :, i], SKI_Trans_all_Z._inv_matrix, mode='edge')
-            for i in range(src3d.shape[2])]
-        if np.max(src3d_T) < 1:  # only if max less then one convert to unit
-            src3d_T = skimage.img_as_uint(src3d_T, force_copy=False)
-        else:
-            src3d_T = np.array(src3d_T, dtype=src3d.dtype)
-        src3d_T = np.transpose(src3d_T, axes=[1, 2, 0])
-        # loop comprehension to apply to all images in src3d_denoise
-        if denoise_all:
-            src3d_T_denoise = [skimage.transform.warp(src3d_denoise[:, :, i], SKI_Trans_all_Z._inv_matrix, mode='edge')
-                               for i in range(src3d_denoise.shape[2])]
-            if np.max(src3d_T_denoise) < 1:  # only if max less then one convert to unit
-                src3d_T_denoise = skimage.img_as_uint(src3d_denoise, force_copy=False)
-            else:
-                src3d_T_denoise = np.array(src3d_T_denoise, dtype=src3d_denoise.dtype)
-            src3d_T_denoise = np.transpose(src3d_T_denoise, axes=[1, 2, 0])
-        else:
-            # APPLY SHIFT to denoise value
-            src3d_T_denoise = skimage.transform.warp(src3d_denoise, SKI_Trans_all_Z._inv_matrix, order=0,
-                                                     mode='edge', preserve_range=True)
-            src3d_T_denoise = src3d_T_denoise.astype(src3d_denoise.dtype)
-    else:  # --- Compute the optical flow
-        if apply_transform:
-            error = 0  # not calculated
-            [v_shift, u_shift] = shiftZ[count_shiftZ]
-            angle_rad = angleZ[count_shiftZ]
-            rotation_trans = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=angle_rad,
-                                                                   translation=(0, 0))
-            count_shiftZ = count_shiftZ + 1
-        else:
-            # find rotation
-            if find_rot:
-                angle_rad = phase_corr_rotation(des3d_reg, src3d_reg, degree_thres, theta_rad)
-            else:
-                angle_rad = 0.0
-            rotation_trans = skimage.transform.SimilarityTransform(matrix=None, scale=1,
-                                                                   rotation=(angle_rad + theta_rad),
-                                                                   translation=(0, 0))
-            # phase correlation here --> then motion based
-            shift, error, diffphase = skimage.registration.phase_cross_correlation(des3d_reg,
-                                                                                   src3d_reg)
-            if np.abs(shift[0]) > Z_max_shift1 or np.abs(shift[1]) > Z_max_shift0:
-                warnings.warn(
-                    message="WARNING: Z shift exceeded limits, shift X = {} shift y = {}. Seeting Z translation to zero.".format(
-                        shift[1], shift[0]))
-                shift[0] = 0
-                shift[1] = 0
-            print('Z Phase translation is {}'.format(shift))
-            # calculate OVERALL SHIFT from inital guess + phase correlations
-            Tran_Z_phase = skimage.transform.SimilarityTransform(matrix=None, scale=1, rotation=(angle_rad + theta_rad),
-                                                                 translation=(shift[1], shift[0]))
-            # apply to image in src3d_denoise to use to calculate V and U
-            src3d_denoise_phase_shift = skimage.transform.warp(src3d_reg, Tran_Z_phase._inv_matrix, order=0,
-                                                               mode='edge', preserve_range=True)
-            src3d_denoise_phase_shift = src3d_denoise_phase_shift.astype(src3d_reg.dtype)
-            v, u = skimage.registration.optical_flow_tvl1(des3d_reg, src3d_denoise_phase_shift)
-            # add phase and motion correction together
-            v_shift = v + -(shift[0])
-            u_shift = u + -(shift[1])
-            # check V and U are correctly added for all images
-            src3d_denoise_phase_shift_raw = skimage.transform.warp(src3d_denoise_phase_shift,
-                                                                   np.array([row_coords + v, col_coords + u]), order=0,
-                                                                   mode='nearest', preserve_range=True)
-            src3d_reg_check = skimage.transform.warp(src3d_reg, np.array([row_coords + v_shift, col_coords + u_shift]),
-                                                     order=0, mode='nearest', preserve_range=True)
-            testzeros = src3d_denoise_phase_shift_raw - src3d_reg_check
-            if testzeros.max() != testzeros.min():
-                warnings.warn(
-                    message="WARNING: optical registration not added correctly to phase correlation for Z = {}".format(
-                        Z))
-            shiftZ.append([v_shift, u_shift])
-            angleZ.append((angle_rad + theta_rad))
-        error_allZ.append([error])
-        # --- Use the estimated optical flow for registration
-        nr, nc = src3d_feature.shape
-        row_coords, col_coords = np.meshgrid(np.arange(nr), np.arange(nc), indexing='ij')
-        # apply to image in src3d feature map
-        src3d_feature_rot = skimage.transform.warp(src3d_feature, rotation_trans._inv_matrix, order=0, mode='edge',
-                                                   preserve_range=True)
-        src3d_feature_rot = src3d_feature_rot.astype(src3d_feature.dtype)
-        src3d_T_feature = skimage.transform.warp(src3d_feature_rot,
-                                                 np.array([row_coords + v_shift, col_coords + u_shift]), order=0,
-                                                 mode='nearest', preserve_range=True)
-        # this chnage back to unit 8 dtype from float 64, this and preserve range are needed to keep shift as binary image
-        src3d_T_feature = src3d_T_feature.astype(src3d_feature.dtype)
-        # loop comprehension to apply to all images in src3d
-        src3d_T_rot = [
-            skimage.transform.warp(src3d[:, :, i], rotation_trans._inv_matrix, order=0, mode='edge',
-                                   preserve_range=True) for i
-            in range(src3d.shape[2])]
-        if np.max(src3d_T_rot) < 1:  # only if max less then one convert to unit
-            src3d_T_rot = skimage.img_as_uint(src3d_T_rot, force_copy=False)
-        else:
-            src3d_T_rot = np.array(src3d_T_rot, dtype=src3d.dtype)
-        src3d_T_rot = np.transpose(src3d_T_rot, axes=[1, 2, 0])
-        src3d_T = [skimage.transform.warp(src3d_T_rot[:, :, i], np.array([row_coords + v_shift, col_coords + u_shift]),
-                                          mode='nearest') for i in range(src3d.shape[2])]
-        if np.max(src3d_T) < 1:  # only if max less then one convert to unit
-            src3d_T = skimage.img_as_uint(src3d_T, force_copy=False)
-        else:
-            src3d_T = np.array(src3d_T, dtype=src3d.dtype)
-        src3d_T = np.transpose(src3d_T, axes=[1, 2, 0])
-        # apply to denoise
-        if denoise_all:
-            src3d_T_denoise_rot = [
-                skimage.transform.warp(src3d_denoise[:, :, i], rotation_trans._inv_matrix, order=0, mode='edge',
-                                       preserve_range=True) for i in range(src3d_denoise.shape[2])]
-            if np.max(src3d_T_denoise_rot) < 1:  # only if max less then one convert to unit
-                src3d_T_denoise_rot = skimage.img_as_uint(src3d_denoise, force_copy=False)
-            else:
-                src3d_T_denoise_rot = np.array(src3d_T_denoise_rot, dtype=src3d_denoise.dtype)
-            src3d_T_denoise_rot = np.transpose(src3d_T_denoise_rot, axes=[1, 2, 0])
-            src3d_T_denoise = [
-                skimage.transform.warp(src3d_T_denoise_rot, np.array([row_coords + v_shift, col_coords + u_shift]),
-                                       order=0, mode='nearest', preserve_range=True) for i in
-                range(src3d_denoise.shape[2])]
-            if np.max(src3d_T_denoise) < 1:  # only if max less then one convert to unit
-                src3d_T_denoise = skimage.img_as_uint(src3d_denoise, force_copy=False)
-            else:
-                src3d_T_denoise = np.array(src3d_T_denoise, dtype=src3d_denoise.dtype)
-            src3d_T_denoise = np.transpose(src3d_T_denoise, axes=[1, 2, 0])
-        else:
-            src3d_T_denoise_rot = skimage.transform.warp(src3d_denoise, rotation_trans._inv_matrix, order=0,
-                                                         mode='edge',
-                                                         preserve_range=True)
-            src3d_T_denoise_rot = src3d_T_denoise_rot.astype(src3d_denoise.dtype)
-            src3d_T_denoise = skimage.transform.warp(src3d_T_denoise_rot,
-                                                     np.array([row_coords + v_shift, col_coords + u_shift]), order=0,
-                                                     mode='nearest', preserve_range=True)
-            # this chnage back to unit 8 dtype from float 64, this and preserve range are needed to keep shift as binary image
-            src3d_T_denoise = src3d_T_denoise.astype(src3d_denoise.dtype)
-
-    return src3d_T, src3d_T_feature, src3d_T_denoise, count_shiftZ, shiftZ, error_allZ
-
-
-"""
 
 def affine_registation(destination, source, degree_thres, theta_rad):
     # AFFINE REGISTRATION
