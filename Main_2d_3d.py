@@ -280,10 +280,12 @@ def main(args):
             Z = count_Z_folder
             print("Z = {}".format(Z))
             # get maximum X and Y in case X/Y plane different size for each Z
-            ALLCubeX = np.zeros(len(cubefolder))
-            ALLCubeY = np.zeros(len(cubefolder))
-            for i in range(len(cubefolder)):
-                allnum = re.sub("[^0-9]", "", cubefolder[i][:])
+            subs = 'Pos{}'.format(Z_one)
+            cubefolder_Zone = list(filter(lambda x: subs in x, cubefolder))
+            ALLCubeX = np.zeros(len(cubefolder_Zone))
+            ALLCubeY = np.zeros(len(cubefolder_Zone))
+            for i in range(len(cubefolder_Zone)):
+                allnum = re.sub("[^0-9]", "", cubefolder_Zone[i][:])
                 ALLCubeX[i] = int(allnum[POS_folder_X0:POS_folder_X1])
                 ALLCubeY[i] = int(allnum[POS_folder_Y0:POS_folder_Y1])
             MaxCubeX = max(ALLCubeX)
@@ -304,6 +306,11 @@ def main(args):
                 remotefilepath = remotesubjectpath_one + cubename
                 localfilepath = args.localsubjectpath  # dont need folder path b/c images removed after downloaded
                 # download and define 3D variable for files in this folder
+                print(remotefilepath)
+                print(localfilepath)
+                print(password_one)
+                print(user_one)
+                print(server_one)
                 imarray3D = func2d3d.sshfoldertransfer(server_one, user_one, password_one, remotefilepath,
                                                        localfilepath, args.image_type, args.opticalZ_dir)
                 model_name = 'model_Z={}'.format(Z)
@@ -830,6 +837,8 @@ def main(args):
     np.savez_compressed(save_folder + args.image_type + '_d3_array', d3_array)
 
     # make videos/images
+    # todo make rotating brian
+
     """
     #try https://github.com/marcomusy/vedo
 
