@@ -169,8 +169,8 @@ def parse_args(add_help=True):
     parser.add_argument("--Noise2void_or_classical", default=False, type=str2bool,
                         help="This applies noise2void Mahcine learning to remove noise instead of classical (wavlet, TVnorm, non-local means) if set to true (ex:--Noise2void_or_classical=True)(default:False)")
 
-    parser.add_argument("--Noise2Void_own_model", default=True, type=str2bool,
-                        help="This applies noise2void Mahcine learning to EACH X Y Z value. Otherwise model just created for each Z plane and applied to all images in that Z plane (ex:--Noise2Void_own_model=True)(default:True)")
+    parser.add_argument("--Noise2Void_own_model", default='own', choices=['own', 'each_Z', 'one_for_all'],
+                        help="This applies noise2void Mahcine learning to EACH X Y Z value ('own'), each Z plane ('each_Z'), or only 1 model for all Z images ('one_for_all'). (ex:--Noise2Void_own_model='one_for_all')(default:own)")
 
     return parser
 
@@ -245,8 +245,10 @@ def main(args):
         # make folder we save evertyhing to and folder we copy over
         if not os.path.isdir(args.localsubjectpath + '/' + args.output + '/'):
             os.mkdir(args.localsubjectpath + '/' + args.output + '/')
+        # make lower case cubefolder
+        for i in range(len(cubefolder)):
+            cubefolder[i] = cubefolder[i].lower()
         # redefine local path to new folder
-
         # todo take this out of pathi loop?
         args.localsubjectpath = args.localsubjectpath + '/' + args.output + '/'
 
@@ -280,7 +282,7 @@ def main(args):
             Z = count_Z_folder
             print("Z = {}".format(Z))
             # get maximum X and Y in case X/Y plane different size for each Z
-            subs = 'Pos{}'.format(Z_one)
+            subs = 'pos{}'.format(Z_one)  # todo add pos as a variable??
             cubefolder_Zone = list(filter(lambda x: subs in x, cubefolder))
             ALLCubeX = np.zeros(len(cubefolder_Zone))
             ALLCubeY = np.zeros(len(cubefolder_Zone))
@@ -290,7 +292,7 @@ def main(args):
                 ALLCubeY[i] = int(allnum[POS_folder_Y0:POS_folder_Y1])
             MaxCubeX = max(ALLCubeX)
             MaxCubeY = max(ALLCubeY)
-            del ALLCubeX, ALLCubeY
+            del ALLCubeX, ALLCubeY, cubefolder_Zone
             # create ML denoise model for this Z plane --> saves time over new model for each X, Y, Z
             if args.Noise2void_or_classical:
 
@@ -306,14 +308,14 @@ def main(args):
                 remotefilepath = remotesubjectpath_one + cubename
                 localfilepath = args.localsubjectpath  # dont need folder path b/c images removed after downloaded
                 # download and define 3D variable for files in this folder
-                print(remotefilepath)
-                print(localfilepath)
-                print(password_one)
-                print(user_one)
-                print(server_one)
                 imarray3D = func2d3d.sshfoldertransfer(server_one, user_one, password_one, remotefilepath,
                                                        localfilepath, args.image_type, args.opticalZ_dir)
-                model_name = 'model_Z={}'.format(Z)
+
+                if args.Noise2Void_own_model == 'one_for_all':
+                    model_name = 'model_Z=all'
+                else:
+                    model_name = 'model_Z={}'.format(Z)
+
                 # remove high intensity large before noise 2 void
                 for count_Z_3d in range(imarray3D.shape[2]):
                     A = imarray3D[:, :, count_Z_3d]
@@ -350,10 +352,12 @@ def main(args):
                                                            localfilepath, args.image_type, args.opticalZ_dir)
                     # denoise the loaded 3d data with noise 2 void
                     if args.Noise2void_or_classical:
-                        if args.Noise2Void_own_model:
+                        if args.Noise2Void_own_model == 'own':
                             model_name = 'model_Z={}_Y={}_X={}'.format(Z, Y, X)  # NEW MODEL FOR EACH X Y Z VALUE
-                        else:
+                        elif args.Noise2Void_own_model == 'each_Z':
                             model_name = 'model_Z={}'.format(Z)  # same Z model as above
+                        elif args.Noise2Void_own_model == 'one_for_all':
+                            model_name = 'model_Z=all'
                         # remove high intesnity and large image b4 noise 2 void
                         for count_Z_3d in range(imarray3D.shape[2]):
                             A = imarray3D[:, :, count_Z_3d]

@@ -198,7 +198,7 @@ def noise2void(data, model_name, localsubjectpath, rolling_ball_radius, double_g
         # You can increase "train_steps_per_epoch" to get even better results at the price of longer computation.
         fast = 128  # default
         slow = 50  # to get better results?  --> apply same model to Z plane
-        speed = slow
+        speed = fast
 
         # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
