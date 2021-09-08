@@ -134,8 +134,8 @@ def parse_args(add_help=True):
                         help="This is used to save additional figured useful in troubleshooting, results saved in registration folder. (ex: --saved_transforms_path=True). (Default: Fasle)")
     parser.add_argument("--max_Z_proj_affine", default=True, type=str2bool,
                         help="This is used to use max Z projections instead of once slice for affine Z slice to Z slice calculateions. Set to true if images are  noisy, or false if low noise levels. (ex:--max_Z_proj_affine=True)(defualt:False)")
-    parser.add_argument("--high_thres", default=10, type=int,
-                        help="This is used to remove image artifacts with high intensiity. This is for images with high_thres > then the meean of the image. Area threshold is set to 1/2 of the high_threshold as a percent of the image. So a value of 10 gives area threshold of 5% of the imaage or more (ex:--high_thres=10)(default:10)")
+    parser.add_argument("--high_thres", default=15, type=int,
+                        help="This is used to remove image artifacts with high intensiity. This is for images with high_thres > then the meean of the image. Area threshold is set to 1/2 of the high_threshold as a percent of the image. So a value of 10 gives area threshold of 5% of the imaage or more (ex:--high_thres=15)(default:15)")
     parser.add_argument("--rigid_2d3d", default=False, type=str2bool,
                         help="This is used to only run rigid registratiion on feature map when combining Z planes, otherwise affine registration with optical flow is preformed.(ex:--rigid_2d3d=False)(default:False)")
     parser.add_argument("--output", default='registration', type=str,
@@ -234,24 +234,26 @@ def main(args):
             sftp_con = ssh_con.open_sftp()
             # get list of folders cubes in data path
             all_files_in_path = sftp_con.listdir(path=remotesubjectpath_one)
-            r = re.compile('Pos')  # this gets all folders with POS in name
+            r = re.compile('pos')  # this gets all folders with POS in name
+            # make lower case all_files_in_path
+            for i in range(len(all_files_in_path)):
+                all_files_in_path[i] = all_files_in_path[i].lower()
             cubefolder = list(filter(r.search, all_files_in_path))
             sftp_con.close()
             ssh_con.close()
         else:
             all_files_in_path = os.listdir(path=remotesubjectpath_one)
-            r = re.compile('Pos')  # this gets all folders with POS in name
+            r = re.compile('pos')  # this gets all folders with POS in name
+            # make lower case cubefolder
+            for i in range(len(all_files_in_path)):
+                all_files_in_path[i] = all_files_in_path[i].lower()
             cubefolder = list(filter(r.search, all_files_in_path))
         # make folder we save evertyhing to and folder we copy over
         if not os.path.isdir(args.localsubjectpath + '/' + args.output + '/'):
             os.mkdir(args.localsubjectpath + '/' + args.output + '/')
-        # make lower case cubefolder
-        for i in range(len(cubefolder)):
-            cubefolder[i] = cubefolder[i].lower()
         # redefine local path to new folder
         # todo take this out of pathi loop?
         args.localsubjectpath = args.localsubjectpath + '/' + args.output + '/'
-
         print("reading file name for file size")
         # get maximum Z
         ALLCubeZ = np.zeros(len(cubefolder))
@@ -282,7 +284,7 @@ def main(args):
             Z = count_Z_folder
             print("Z = {}".format(Z))
             # get maximum X and Y in case X/Y plane different size for each Z
-            subs = 'pos{}'.format(Z_one)  # todo add pos as a variable??
+            subs = 'pos{}_'.format(Z_one)  # todo add pos as a variable??
             cubefolder_Zone = list(filter(lambda x: subs in x, cubefolder))
             ALLCubeX = np.zeros(len(cubefolder_Zone))
             ALLCubeY = np.zeros(len(cubefolder_Zone))
@@ -294,46 +296,41 @@ def main(args):
             MaxCubeY = max(ALLCubeY)
             del ALLCubeX, ALLCubeY, cubefolder_Zone
             # create ML denoise model for this Z plane --> saves time over new model for each X, Y, Z
-            if args.Noise2void_or_classical:
+            # if args.Noise2void_or_classical:
+            # todo take ALL denoise outside of this for loop so it can be in own for loop and run multiprocessing on denoise?
+            # note cant run parrel on registration b/c past results needed for future result
 
-                # todo take ALL denoise outside of this for loop so it can be in own for loop and run multiprocessing on denoise?
-                # note cant run parrel on registration b/c past results needed for future result
-
-                print('Calculating Noise2Void model because Noise2void_or_classical set to true')
-                Zstring = str(Z_one)
-                Ystring = '00' + str(int(MaxCubeY / 2))  # hard code chosenn Y in middle of image
-                Xstring = '00' + str(int(MaxCubeX / 2))  # hard code chosenn X in middle of image
-                cubename = '/Pos' + Zstring + '_' + Xstring + '_' + Ystring + '/'
-                # download files in this X Y Z folder --> this is ONE cube
-                remotefilepath = remotesubjectpath_one + cubename
-                localfilepath = args.localsubjectpath  # dont need folder path b/c images removed after downloaded
-                # download and define 3D variable for files in this folder
-                imarray3D = func2d3d.sshfoldertransfer(server_one, user_one, password_one, remotefilepath,
-                                                       localfilepath, args.image_type, args.opticalZ_dir)
-
-                if args.Noise2Void_own_model == 'one_for_all':
-                    model_name = 'model_Z=all'
-                else:
-                    model_name = 'model_Z={}'.format(Z)
-
-                # remove high intensity large before noise 2 void
-                for count_Z_3d in range(imarray3D.shape[2]):
-                    A = imarray3D[:, :, count_Z_3d]
-                    if (A > (args.high_thres * A.mean())).any() and A.ndim == 2:
-                        warnings.warn(message='High intensity Image detected')
-                        high_thres_dec = args.high_thres / 100
-                        # remove whole connected image to this
-                        int_thres = (args.high_thres * A.mean())
-                        area_thres = A.shape[1] * (high_thres_dec / 2)
-                        imarray3D[:, :, count_Z_3d] = func2d3d.remove_large_obj(A, area_thres, int_thres,
-                                                                                args.rolling_ball_radius,
-                                                                                args.double_gaussian, high_thres_dec)
-                imarray3D = func2d3d.noise2void(imarray3D, model_name, args.localsubjectpath, args.rolling_ball_radius,
-                                                args.double_gaussian)
-
-                # todo add why to get % image overlap based on middle images in X and Y
-
-                del imarray3D
+            #    print('Calculating Noise2Void model because Noise2void_or_classical set to true')
+            #    Zstring = str(Z_one)
+            #    Ystring = '00' + str(int(MaxCubeY / 2))  # hard code chosenn Y in middle of image
+            #    Xstring = '00' + str(int(MaxCubeX / 2))  # hard code chosenn X in middle of image
+            #    cubename = '/Pos' + Zstring + '_' + Xstring + '_' + Ystring + '/'
+            #    # download files in this X Y Z folder --> this is ONE cube
+            #    remotefilepath = remotesubjectpath_one + cubename
+            #    localfilepath = args.localsubjectpath  # dont need folder path b/c images removed after downloaded
+            #    # download and define 3D variable for files in this folder
+            #    imarray3D = func2d3d.sshfoldertransfer(server_one, user_one, password_one, remotefilepath,
+            #                                           localfilepath, args.image_type, args.opticalZ_dir)
+            #    if args.Noise2Void_own_model == 'one_for_all':
+            #        model_name = 'model_Z=all'
+            #    else:
+            #        model_name = 'model_Z={}'.format(Z)
+            # remove high intensity large before noise 2 void
+            #    for count_Z_3d in range(imarray3D.shape[2]):
+            #        A = imarray3D[:, :, count_Z_3d]
+            #        if (A > (args.high_thres * A.mean())).any() and A.ndim == 2:
+            #            warnings.warn(message='High intensity Image detected')
+            #            high_thres_dec = args.high_thres / 100
+            #            # remove whole connected image to this
+            #            int_thres = (args.high_thres * A.mean())
+            #            area_thres = A.shape[1] * (high_thres_dec / 2)
+            #            imarray3D[:, :, count_Z_3d] = func2d3d.remove_large_obj(A, area_thres, int_thres,
+            #                                                                    args.rolling_ball_radius,
+            #                                                                    args.double_gaussian, high_thres_dec)
+            #    imarray3D = func2d3d.noise2void(imarray3D, model_name, args.localsubjectpath, args.rolling_ball_radius,
+            #                                    args.double_gaussian)
+            # todo add why to get % image overlap based on middle images in X and Y
+            #   del imarray3D
             # for Y
             for Y in range(int(MaxCubeY) + 1):
                 print("Y = {}".format(Y))

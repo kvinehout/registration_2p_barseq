@@ -320,6 +320,7 @@ def wavlet_registration(image1, image2):
 def sshfoldertransfer(server, user, password, remotefilepath, localfilepath, image_type, opticalZ_dir):
     """Connects to host and searches for files matching file_pattern
     in remote_path. Downloads all matches to 'local_path'"""
+    print('remote path is {}'.format(remotefilepath))
     if server != 'local':
         # Opening ssh and ftp
         ssh_con = paramiko.SSHClient()
