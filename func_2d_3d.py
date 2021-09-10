@@ -844,34 +844,38 @@ def feature_CV2(destination_raw, source_raw, diroverlap, rolling_ball_radius, do
     # define denoised data
     destination = destination_denoise
     source = source_denoise
-    # convert to grayscale
-
-    # todo remove converstion to gray scale?
-
-    destination = np.interp(destination, (destination.min(), destination.max()), (0, +255))
-    source = np.interp(source, (source.min(), source.max()), (0, +255))
+    # convert to grayscale --> removed this step
+    # destination = np.interp(destination, (destination.min(), destination.max()), (0, +255))
+    # source = np.interp(source, (source.min(), source.max()), (0, +255))
     # change dtype to unit 8 --> so get rid of decimals
-    destination = destination.astype(np.uint8)
-    source = source.astype(np.uint8)
-    im_src3d = Image.fromarray(source)
-    im_src3d.save(localsubjectpath + "src3d_denoise.jpeg")
-    im_des3d = Image.fromarray(destination)
-    im_des3d.save(localsubjectpath + "des3d_denoise.jpeg")
+    # destination = destination.astype(np.uint8)
+    # source = source.astype(np.uint8)
+    # im_src3d = Image.fromarray(source)
+    # im_src3d.save(localsubjectpath + "src3d_denoise.jpeg")
+    # im_des3d = Image.fromarray(destination)
+    # im_des3d.save(localsubjectpath + "des3d_denoise.jpeg")
     # Read reference imagw
-    refFilename = '{}/{}'.format(localsubjectpath, 'des3d_denoise.jpeg')
-    imReference = cv2.imread(refFilename, cv2.IMREAD_GRAYSCALE)
+    # refFilename = '{}/{}'.format(localsubjectpath, 'des3d_denoise.jpeg')
+    # imReference = cv2.imread(refFilename, cv2.IMREAD_GRAYSCALE)
     # Read image to be aligned
-    imFilename = '{}/{}'.format(localsubjectpath, 'src3d_denoise.jpeg')
-    im1 = cv2.imread(imFilename, cv2.IMREAD_GRAYSCALE)
+    # imFilename = '{}/{}'.format(localsubjectpath, 'src3d_denoise.jpeg')
+    # im1 = cv2.imread(imFilename, cv2.IMREAD_GRAYSCALE)
+
+    # ORB is finicky and wants 3D arrays so adding another dimension to the input arrays. Also, ORB is double finicky and
+    # preferes unsigned ints. I could be wrong.
+    imReference = np.empty((destination.shape[0], destination.shape[1], 1), np.uint8)
+    im1 = np.empty((source.shape[0], source.shape[1], 1), np.uint8)
+    imReference[:, :, 0] = destination
+    im1[:, :, 0] = source
     # preallocate shift
     shift = np.zeros(2)
-    MAX_MATCHES = 500
+    MAX_MATCHES = 100000
     GOOD_MATCH_PERCENT = 0.05  # this is 5 percent
     # Convert images to grayscale
     im1Gray = im1  # cv2.cvtColor(im1, cv2.COLOR_BGR2GRAY)
     im2Gray = imReference  # cv2.cvtColor(imReference, cv2.COLOR_BGR2GRAY)
     # Detect ORB features and compute descriptors.
-    orb = cv2.ORB_create(MAX_MATCHES)
+    orb = cv2.ORB_create(MAX_MATCHES, edgeThreshold=20, patchSize=21)
     keypoints1, descriptors1 = orb.detectAndCompute(im1Gray, None)
     keypoints2, descriptors2 = orb.detectAndCompute(im2Gray, None)
     if np.any(descriptors1) == None or np.any(descriptors2) == None:
@@ -914,8 +918,10 @@ def feature_CV2(destination_raw, source_raw, diroverlap, rolling_ball_radius, do
         else:
             m, inliers = cv2.estimateAffinePartial2D(points1, points2)
             # Use affine transform to warp im2 to match im1
-            height, width = imReference.shape
-            im1Reg = cv2.warpAffine(im1, m, (width, height))
+            imReference_sq = np.squeeze(imReference)
+            im1_sq = np.squeeze(im1)
+            height, width = imReference_sq.shape
+            im1Reg = cv2.warpAffine(im1_sq, m, (width, height))
             shift[0] = m[1, 2]
             shift[1] = m[0, 2]
             error = 0  # todo add this?
