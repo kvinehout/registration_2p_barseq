@@ -175,6 +175,9 @@ def parse_args(add_help=True):
     return parser
 
 
+# TODO ADD TYPE CHECK FOR EACH FUNCTION.... image read in as whole numbers 0-1000 we want to keep this... if we let decimals we get more memory storage?
+
+
 def main(args):
     print("starting registration program")
     # if apply transform is ture
@@ -330,6 +333,7 @@ def main(args):
             #    imarray3D = func2d3d.noise2void(imarray3D, model_name, args.localsubjectpath, args.rolling_ball_radius,
             #                                    args.double_gaussian)
             # todo add why to get % image overlap based on middle images in X and Y
+            #
             #   del imarray3D
             # for Y
             for Y in range(int(MaxCubeY) + 1):
@@ -423,6 +427,7 @@ def main(args):
                         del AB_img
                     else:
                         print("Stitching file X = {} and X= {} together.".format(X, (X - 1)))
+                        #todo try to do max projectioin on overlap instead of one of the iamges???
                         desY = AB_img_old  # define destination image
                         if args.apply_transform:
                             error = 0  # not calculated
@@ -839,6 +844,8 @@ def main(args):
 
     # make videos/images
     # todo make rotating brian
+
+    # https: // holoviz.org /
 
     """
     #try https://github.com/marcomusy/vedo

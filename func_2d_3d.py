@@ -236,6 +236,9 @@ def noise2void(data, model_name, localsubjectpath, rolling_ball_radius, double_g
         pred_YXZ = pred  # no rearage
     if data.ndim == 3:
         pred_YXZ = np.moveaxis(pred, 0, 2)  # rearage so YXZ is now ZYX
+
+    # TODO MAKE SURE DYPE OF  pred_YXZ is that of data
+
     # remove lighting effect
     data_denoise = remove_light_effect(pred_YXZ, rolling_ball_radius, double_gaussian)
     # save figures
