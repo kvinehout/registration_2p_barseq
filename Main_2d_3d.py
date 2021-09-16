@@ -51,6 +51,10 @@ print("importing modules")
 # Import modules
 import paramiko
 import os
+
+os.environ['OMP_NUM_THREADS'] = '1'
+os.environ['MKL_NUM_THREADS'] = '1'
+os.environ['NUMEXPR_NUM_THREADS'] = '1'
 import skimage.registration
 import skimage.transform
 import skimage.util
